@@ -1,0 +1,20 @@
+apiVersion: db.sealos.io/v1
+kind: Bytebase
+metadata:
+  labels:
+    app.kubernetes.io/name: bytebase
+    app.kubernetes.io/instance: bytebase-sample
+    app.kubernetes.io/part-of: bytebase
+    app.kubernetes.io/managed-by: kustomize
+    app.kubernetes.io/created-by: bytebase
+  name: bytebase-sample
+spec:
+  user: ccl
+  token: abc
+  apiServer: https://192.168.2.29:8443
+  image: bytebase/bytebase:1.13.0
+  replicas: 1
+  keepalived: 11h
+  ingressType: nginx
+  externalUrl: http://192.168.2.29:30007
+  port: 8080
