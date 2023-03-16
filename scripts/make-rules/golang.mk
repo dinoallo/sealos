@@ -61,7 +61,7 @@ go.build.%:
 
 	@if [ "$(COMMAND)" == "sealos" ] || [ "$(COMMAND)" == "sealctl" ]; then \
 		CGO_ENABLED=1; \
-		CC=x86_64-linux-gnu-gcc; \
+		CC=x86_64-pc-linux-gnu-gcc; \
 		if [ "$(ARCH)" == "arm64" ]; then \
 			CC=aarch64-linux-gnu-gcc; \
 		fi; \
