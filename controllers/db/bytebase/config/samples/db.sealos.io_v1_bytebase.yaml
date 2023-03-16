@@ -9,12 +9,4 @@ metadata:
     app.kubernetes.io/created-by: bytebase
   name: bytebase-sample
 spec:
-  user: ccl
-  token: abc
-  apiServer: https://192.168.2.29:8443
-  image: bytebase/bytebase:1.13.0
-  replicas: 1
-  keepalived: 11h
-  ingressType: nginx
-  externalUrl: http://192.168.2.29:30007
-  port: 8080
+  # TODO(user): Add fields here
