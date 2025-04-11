@@ -22,6 +22,8 @@ type Interface interface {
 	ScaleDown(deleteMastersIPList []string, deleteNodesIPList []string) error
 	Upgrade(version string) error
 	GetRawConfig() ([]byte, error)
+	UpgradeKubeletConfig() error
+	UpgradeControlPlane() error
 }
 
 type Ruler interface {

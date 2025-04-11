@@ -312,3 +312,67 @@ func (k *KubeadmRuntime) changeKubeletExtraArgs(ip string) error {
 		"systemctl restart kubelet",
 	)
 }
+
+func (k *KubeadmRuntime) InitExistingKubeadmConfig() error {
+	// get current kubeadm config from defaults and clusterfile
+	if err := k.MergeKubeadmConfig(); err != nil {
+		return err
+	}
+	return nil
+}
+
+const (
+	updateTimeout = 5 * time.Second
+)
+
+func (k *KubeadmRuntime) UpgradeControlPlane() error {
+	// get a k8s client
+	exp, err := k.getKubeExpansion()
+	if err != nil {
+		return err
+	}
+
+	conv, err := k.kubeadmConfig.ToConvertedKubeadmConfig()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
+	defer cancel()
+	newClusterData, err := yaml.MarshalConfigs(&conv.ClusterConfiguration)
+	if err != nil {
+		return err
+	}
+	logger.Debug("update kubeadm-config:\n%s", string(newClusterData))
+	err = exp.UpdateKubeadmConfig(ctx, string(newClusterData))
+	if err != nil {
+		logger.Error("failed to update kubeadm-config with k8s-client: %s", err)
+		return err
+	}
+	return nil
+}
+
+func (k *KubeadmRuntime) UpgradeKubeletConfig() error {
+	// get a k8s client
+	exp, err := k.getKubeExpansion()
+	if err != nil {
+		return err
+	}
+
+	conv, err := k.kubeadmConfig.ToConvertedKubeadmConfig()
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
+	defer cancel()
+	newKubeletConfigData, err := yaml.MarshalConfigs(&conv.KubeletConfiguration)
+	if err != nil {
+		return err
+	}
+	logger.Debug("update kubelet-config:\n%s", string(newKubeletConfigData))
+	err = exp.UpdateKubeletConfig(ctx, string(newKubeletConfigData))
+	if err != nil {
+		logger.Error("failed to update kubelet-config with k8s-client: %s", err)
+		return err
+	}
+	return nil
+}
