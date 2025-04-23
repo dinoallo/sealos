@@ -1,0 +1,120 @@
+
+name: Build Controllers image
+
+on:
+  workflow_run:
+    workflows: [Check and resolve pushed controller code]
+    types:
+      - completed
+
+env:
+  # Common versions
+  GO_VERSION: "1.22"
+jobs:
+  image-build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    strategy:     
+       matrix:
+        module:
+          - { name: user, path: user } #TODO: maybe we should detect modules with a script
+          # - { name: terminal, path: terminal }
+          # - { name: account, path: account }
+          # - { name: app, path: app }
+          # - { name: db-adminer, path: db/adminer }
+          # - { name: license, path: license }
+          # - { name: job-init, path: job/init }
+          # - { name: job-heartbeat, path: job/heartbeat }
+          # - { name: resources, path: resources }
+          # - { name: node, path: node }
+          # - { name: devbox, path: devbox}
+          # - { name: objectstorage, path: objectstorage }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Golang with cache
+        uses: magnetikonline/action-golang-cache@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build ${{ matrix.module.name }} amd64
+        working-directory: controllers/${{ matrix.module.path }}
+        env:
+          MODULE_NAME: ${{ matrix.module.name }}
+          MODULE_PATH: ${{ matrix.module.path }}
+        run: |
+          GOARCH=amd64 TARGETARCH=amd64 make build
+          mv bin/manager "bin/controller-${MODULE_NAME}-amd64"
+          chmod +x "bin/controller-${MODULE_NAME}-amd64"
+
+      - name: Build ${{ matrix.module.name }} arm64
+        working-directory: controllers/${{ matrix.module.path }}
+        env:
+          MODULE_NAME: ${{ matrix.module.name }}
+          MODULE_PATH: ${{ matrix.module.path }}
+        run: |
+          GOARCH=arm64 TARGETARCH=arm64 make build
+          mv bin/manager "bin/controller-${MODULE_NAME}-arm64"
+          chmod +x "bin/controller-${MODULE_NAME}-arm64"
+
+      - name: Expose git commit data
+        uses: rlespinasse/git-commit-data-action@v1
+      - name: Check if tag
+        id: check_tag
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [[ "$REF" == refs/tags/* ]]; then
+            echo "isTag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "isTag=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare
+        id: prepare
+        env:
+          IS_TAG: ${{ steps.check_tag.outputs.isTag }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          MODULE_NAME: ${{ matrix.module.name }}
+        run: |
+          bash scripts/resolve-tag-image.sh "$PUSH_IMAGE" "$IS_TAG" "$PUSH_IMAGE_TAG"
+          echo "docker_repo=ghcr.io/${REPO_OWNER}/sealos-${MODULE_NAME}-controller" >> $GITHUB_OUTPUT
+
+      - # Add support for more platforms with QEMU (optional)
+        # https://github.com/docker/setup-qemu-action
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ghcr.io/${{ github.repository_owner }}/sealos-${{ matrix.module.name }}-controller
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', 'main') }}
+            type=raw,value=${{ steps.prepare.outputs.tag_name }},enable=true
+
+      - name: build (and publish) ${{ matrix.module.name }} main image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./controllers/${{ matrix.module.path }}
+          file: ./controllers/${{ matrix.module.path }}/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          platforms: linux/amd64,linux/arm64
