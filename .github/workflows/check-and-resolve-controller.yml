@@ -1,30 +1,18 @@
 
-name: Check and resolve pushed controller code
+name: Check and resolve controller code
 
 on:
+  workflow_dispatch:
   push:
     branches: [ "main" ]
     paths:
-      - "controllers/**"
+      - "controllers/**"  
 env:
   # Common versions
   GO_VERSION: "1.22"
   DEFAULT_OWNER: "labring"
 jobs:
-  resolve-modules:
-    runs-on: ubuntu-24.04
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - name: Resolve Modules
-        id: set-matrix
-        run: bash scripts/resolve-modules.sh ./controllers
-
   golangci-lint:
-    if: ${{ github.event_name }} == 'push'
-    needs: [ resolve-modules ]
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false    

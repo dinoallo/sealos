@@ -3,7 +3,7 @@ name: Build Controllers image
 
 on:
   workflow_run:
-    workflows: [Check and resolve pushed controller code]
+    workflows: [Check and resolve controller code]
     types:
       - completed
 
@@ -12,6 +12,7 @@ env:
   GO_VERSION: "1.22"
 jobs:
   image-build:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
