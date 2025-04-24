@@ -1,7 +1,8 @@
 name:  Controller workflow entry after receiving push event
 on:
   push:
-    branches: [ "main" ]
+    branches:
+      - main
     paths:
       - "controllers/"
 

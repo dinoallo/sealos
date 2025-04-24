@@ -1,7 +1,8 @@
 name:  Controller workflow entry after receiving pull request event
 on:
   pull_request:
-    branches: [ "*" ]
+    branches:
+      - "*"
     paths:
       - "controllers/"
 
