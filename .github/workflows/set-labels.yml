@@ -1,10 +1,9 @@
 name: "Label pull request"
-on:
+on: pull_request_target
   # This workflow uses `pull_reqeust_target` event to grant default r/w permission on pull requests.
   # It's safe since this workflow only alters labels.
   # PLEASE DO NOT USE THIS EVENT IN SCENARIOS OTHER THEN LABELING AND COMMENTING ON PULL REQUESTS!
   # ref: https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#pull_request_target
-  - pull_request_target
 
 jobs:
   labeler:
@@ -14,4 +13,6 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4 # Uploads repository content to the runner
-    - uses: actions/labeler@v4
+    - uses: actions/labeler@v5
+      with:
+        repo-token: "${{ secrets.GITHUB_TOKEN }}"
