@@ -1,5 +1,7 @@
 name: "Label pull request"
-on: pull_request_target
+on: 
+  pull_request_target:
+    types: [opened, reopened, synchronize]
   # This workflow uses `pull_reqeust_target` event to grant default r/w permission on pull requests.
   # It's safe since this workflow only alters labels.
   # PLEASE DO NOT USE THIS EVENT IN SCENARIOS OTHER THEN LABELING AND COMMENTING ON PULL REQUESTS!
@@ -10,6 +12,7 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+      issues: write
     runs-on: ubuntu-24.04
     steps:
     - uses: actions/checkout@v4 # Uploads repository content to the runner
