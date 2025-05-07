@@ -31,11 +31,6 @@ jobs:
           - arch: arm64
             runs-on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs-on || 'ubuntu-24.04' }}
-    permissions:
-      contents: read
-      # If this workflow is trigged by `pull_requests` event from forked repository, this job will not be granted any write permission, 
-      # so it's safe if we set packages: write here
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -75,6 +70,7 @@ jobs:
           mkdir -p "${{ runner.temp }}/digests"
           touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
       - name: Upload digest
+        if: ${{ inputs.needs_push }}
         uses: actions/upload-artifact@v4
         with:
           name: digests-${{ inputs.module_name }}-${{ matrix.arch }}
@@ -83,9 +79,6 @@ jobs:
           retention-days: 1
   merge:
     needs: [build]
-    permissions:
-      contents: read
-      packages: write
     name: Merge and push docker images
     if: ${{ inputs.needs_push }}
     uses: ./.github/workflows/merge-and-push.yml
