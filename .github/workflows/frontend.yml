@@ -45,7 +45,7 @@ jobs:
       repo: ${{ needs.prepare-image-info.outputs.cur_docker_repo }}
       tag: ${{ needs.prepare-image-info.outputs.tag_name }}
   build-frontend-cluster-image:
-    if: ${{ inputs.push == 'true' }}
+    if: ${{ inputs.push }}
     needs: [build-image, prepare-image-info]
     uses: ./.github/workflows/build-cluster-image.yml
     with:
