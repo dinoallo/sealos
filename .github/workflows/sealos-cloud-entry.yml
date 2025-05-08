@@ -1,0 +1,122 @@
+name: Default sealos cloud workflow entry
+
+on:
+  push:
+    branches: [ "main" ]
+    paths:
+      - "deploy/cloud/**"
+  workflow_dispatch:
+    inputs:
+      push_image:
+        description: 'Push image'
+        required: false
+        type: boolean
+        default: false
+      push_image_tag:
+        description: 'Push all-in-one image tag, default is latest'
+        default: 'latest'
+        required: false
+        type: string
+      build_from:
+        description: 'Build all-in-one image from components image tag, default is latest'
+        default: 'latest'
+        required: false
+        type: string
+
+jobs:
+  fetch-sealos:
+    permissions: {}
+    uses: ./.github/workflows/fetch-sealos.yml
+    with:
+      artifact_name: "sealos"
+  build-cluster-image:
+    needs:
+      - fetch-sealos
+    runs-on: ubuntu-24.04
+    permissions:
+        contents: read
+        packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Expose git commit data
+        uses: rlespinasse/git-commit-data-action@v1
+      - name: Check if tag
+        id: check_tag
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          if [[ "$REF" == refs/tags/* ]]; then
+            echo "isTag=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "isTag=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Prepare
+        id: prepare
+        env:
+          PUSH_IMAGE: ${{ inputs.push_image }}
+          IS_TAG: ${{ steps.check_tag.outputs.isTag }}
+          PUSH_IMAGE_TAG: ${{ inputs.push_image_tag }}
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          bash scripts/resolve-tag-image.sh "$PUSH_IMAGE" "$IS_TAG" "$PUSH_IMAGE_TAG"
+          echo "repo=ghcr.io/${REPO_OWNER}/sealos-cloud" >> $GITHUB_OUTPUT
+      - name: Download sealos
+        uses: actions/download-artifact@v4
+        with:
+          name: sealos
+          path: /tmp/
+      - name: Verify sealos
+        run: |
+          sudo chmod a+x /tmp/sealos
+          sudo mv /tmp/sealos /usr/bin/sealos
+          sudo sealos version
+
+      # todo: mutate image tag in images/shim and scripts or change scripts to use changeable tags
+
+      - name: Sealos login to ghcr.io
+        # if push to master, then login to ghcr.io
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GH_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo sealos login -u "${REPOSITORY_OWNER}" -p "${GH_PAT}" --debug ghcr.io
+
+      - name: Build sealos cloud cluster image
+        working-directory: deploy/cloud
+        env:
+          BUILD_FROM: ${{ inputs.build_from }}
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.prepare.outputs.repo }}
+          TAG_NAME: ${{ steps.prepare.outputs.tag_name }}
+        run: |
+          [ -z "${BUILD_FROM}" ] && BuildFromTag="latest" || BuildFromTag="${BUILD_FROM}"; echo "BuildFromTag=${BuildFromTag}"
+          sed -i "s#labring#${REPOSITORY_OWNER}#g" init.sh
+          sed -i "s#latest#${BuildFromTag}#g" init.sh
+
+          sudo bash init.sh amd64 
+          sudo sealos build -t "${REPO}:${TAG_NAME}-amd64" --platform linux/amd64 -f Kubefile
+          sudo sealos build -t "${REPO}:latest-amd64" --platform linux/amd64 -f Kubefile
+
+          # delete old registry cache
+          sudo rm -rf registry
+          sudo rm -rf tars
+
+          sudo bash init.sh arm64 
+          sudo sealos build -t "${REPO}:${TAG_NAME}-arm64" --platform linux/arm64 -f Kubefile
+          sudo sealos build -t "${REPO}:latest-arm64" --platform linux/arm64 -f Kubefile
+
+      - name: Manifest Cluster Images
+        # if push to master, then patch images to ghcr.io
+        env:
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ steps.prepare.outputs.repo }}
+          TAG_NAME: ${{ steps.prepare.outputs.tag_name }}
+        run: |
+          sudo sealos images
+          bash scripts/manifest-cluster-images.sh "$REPO:$TAG_NAME"
+          bash scripts/manifest-cluster-images.sh "$REPO:latest"
+
+      # todo: build multi-arch images
