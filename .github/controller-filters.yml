@@ -10,9 +10,6 @@ app:
 devbox:
 - 'controllers/devbox/**'
 
-job:
-- 'controllers/job/**'
-
 license:
 - 'controllers/license/**'
 

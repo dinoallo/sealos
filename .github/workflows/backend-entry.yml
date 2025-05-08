@@ -88,6 +88,22 @@ jobs:
         name: Filter all services
         with:
           filters: ./.github/service-filters.yml
+
+  detect-job-controller:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      jobs: ${{ steps.filter.outputs.changes }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        name: Filter all job controllers
+        with:
+          filters: ./.github/job-controller-filters.yml
   controller-entry:
     needs: [fetch-sealos, detect-controller]
     if: ${{ needs.detect-controller.outputs.controllers != '[]' && needs.detect-controller.outputs.controllers != '' }}
@@ -103,6 +119,23 @@ jobs:
     with:
       module_name: "${{ matrix.controller }}"
       module_path: "${{ matrix.controller }}"
+      push: ${{ github.event_name == 'push' || github.event_name == 'create' }}
+      workdir: "controllers"
+      comp: "controller"
+
+  job-controller-entry:
+    needs: [fetch-sealos, detect-job-controller]
+    if: ${{ needs.detect-job-controller.outputs.jobs != '[]' && needs.detect-job-controller.outputs.jobs != '' }}
+    strategy:
+      matrix:
+        job: ${{ fromJSON(needs.detect-job-controller.outputs.jobs) }}
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/backend.yml
+    with:
+      module_name: "job-${{ matrix.job }}"
+      module_path: "job/${{ matrix.job }}"
       push: ${{ github.event_name == 'push' || github.event_name == 'create' }}
       workdir: "controllers"
       comp: "controller"
