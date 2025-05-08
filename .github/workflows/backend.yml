@@ -22,6 +22,14 @@ on:
       push:
         type: boolean
         default: false
+      custom:
+        required: false
+        type: boolean
+        default: false
+      custom_tag:
+        required: false
+        type: string
+        default: "latest"
 jobs:
   run-linter:
     uses: ./.github/workflows/golangci-lint.yml
@@ -34,6 +42,8 @@ jobs:
     with:
       module_name: ${{ inputs.module_name }}
       comp: ${{ inputs.comp }}
+      custom: ${{ inputs.custom }}
+      custom_tag: ${{ inputs.custom_tag }}
   build-image:
     needs: [run-linter, prepare-image-info]
     uses: ./.github/workflows/build-backend-image.yml

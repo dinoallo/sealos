@@ -18,12 +18,22 @@ on:
       push:
         type: boolean
         default: false
+      custom:
+        required: false
+        type: boolean
+        default: false
+      custom_tag:
+        required: false
+        type: string
+        default: "latest"
 jobs:
   prepare-image-info:
     uses: ./.github/workflows/prepare-image-info.yml
     with:
       module_name: ${{ inputs.module_name }}
       comp: ${{ inputs.comp }}
+      custom: ${{ inputs.custom }}
+      custom_tag: ${{ inputs.custom_tag }}
   build-image:
     needs: [prepare-image-info]
     uses: ./.github/workflows/build-frontend-image.yml

@@ -58,6 +58,8 @@ jobs:
       push: true
       workdir: "${{ matrix.backend.workdir }}"
       comp: "${{ matrix.backend.comp }}"
+      custom: true
+      custom_tag: ${{ inputs.tag || github.event.release.tag_name }}
   release-frontends:
     needs: [fetch-sealos]
     if: ${{ inputs.build_offline_tar_only == false }}
@@ -85,6 +87,8 @@ jobs:
       module_name: "${{ matrix.frontend.name }}"
       module_path: "${{ matrix.frontend.path }}"
       push: true
+      custom: true
+      custom_tag: ${{ inputs.tag || github.event.release.tag_name }}
   release-cloud:
     needs: [fetch-sealos, release-backends, release-frontends]
     if: ${{ inputs.build_offline_tar_only == false }}
