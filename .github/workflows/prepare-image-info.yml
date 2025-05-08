@@ -8,16 +8,14 @@ on:
       comp:
         required: true
         type: string
-      # TODO: rename this
-      needs_push:
+      custom:
         required: false
         type: boolean
         default: false
-      # TODO: rename this
-      push_image_tag:
+      custom_tag:
         required: false
         type: string
-        default: ""
+        default: "latest"
       orig_owner:
         required: false
         type: string
@@ -44,32 +42,26 @@ jobs:
       cur_cluster_repo: ${{ steps.prepare-image-info.outputs.cur_cluster_repo }}
       tag_name: ${{ steps.prepare-tag-info.outputs.tag_name }}
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Expose git commit data
         uses: rlespinasse/git-commit-data-action@v1
       - name: Check if tagged
         id: check_tag
         env:
-          REF: ${{ github.ref }}
+          REF: ${{ github.ref }} # required by resolve_tag.sh
         run: |
-          if [[ "$REF" == refs/tags/* ]]; then
-            echo "is_tag=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_tag=false" >> "$GITHUB_OUTPUT"
-          fi
+          bash .github/workflows/scripts/resolve_tag.sh
       - name: Prepare tag info
         id: prepare-tag-info
+        env:
+          IF_CUSTOM: ${{ inputs.custom }}
+          TAGGED: ${{ steps.check_tag.outputs.tagged }}
+          CUSTOM_TAG: ${{ inputs.custom_tag }}
         run: |
-          SHA_TAG=${GIT_COMMIT_SHORT_SHA}
-          tag_name="$SHA_TAG"
-          push_image=${{ inputs.needs_push }}
-          push_image_tag=${{ inputs.push_image_tag }}
-          release=${{ steps.check_tag.outputs.is_tag }}
-          if [[ "$push_image" == true ]]; then
-            tag_name=${push_image_tag:-latest}
-          elif [[ "$release" == true ]]; then
-            tag_name=${GITHUB_REF#refs/tags/}
-          fi
-          echo "tag_name=$tag_name" >> "$GITHUB_OUTPUT"
+           bash .github/workflows/scripts/resolve_tag.sh "$IF_CUSTOM" "$TAGGED" "$CUSTOM_TAG"
       - name: Prepare image info
         id: prepare-image-info
         env:

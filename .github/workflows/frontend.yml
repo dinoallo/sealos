@@ -24,7 +24,6 @@ jobs:
     with:
       module_name: ${{ inputs.module_name }}
       comp: ${{ inputs.comp }}
-      needs_push: ${{ inputs.push }}
   build-image:
     needs: [prepare-image-info]
     uses: ./.github/workflows/build-frontend-image.yml

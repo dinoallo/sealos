@@ -34,7 +34,6 @@ jobs:
     with:
       module_name: ${{ inputs.module_name }}
       comp: ${{ inputs.comp }}
-      needs_push: ${{ inputs.push }}
   build-image:
     needs: [run-linter, prepare-image-info]
     uses: ./.github/workflows/build-backend-image.yml
