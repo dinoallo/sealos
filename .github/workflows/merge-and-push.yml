@@ -3,6 +3,9 @@ name: Merge multi-platform image and push
 on:
   workflow_call:
     inputs:
+      comp:
+        type: string
+        required: true
       module_name:
         type: string
         required: true
@@ -22,7 +25,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           path: ${{ runner.temp }}/digests
-          pattern: digests-${{ inputs.module_name }}-*
+          pattern: digests-${{ inputs.comp }}-${{ inputs.module_name }}-*
           merge-multiple: true
 
       - name: Login to ghcr.io

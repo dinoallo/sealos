@@ -39,11 +39,6 @@ jobs:
           - arch: arm64
             runs-on: ubuntu-24.04-arm
     runs-on: ${{ matrix.runs-on || 'ubuntu-24.04' }}
-    permissions:
-    # If this workflow is trigged by `pull_requests` event from forked repository, this job will not be granted any write permission, 
-    # so it's safe if we set packages: write here
-      contents: read
-      packages: write
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -91,8 +86,9 @@ jobs:
           touch "${{ runner.temp }}/digests/${DIGEST#sha256:}"
       - name: Upload digest
         uses: actions/upload-artifact@v4
+        id: upload
         with:
-          name: digests-${{ inputs.module_name }}-${{ matrix.arch }}
+          name: digests-${{ inputs.comp }}-${{ inputs.module_name }}-${{ matrix.arch }}
           path: ${{ runner.temp }}/digests/*
           if-no-files-found: error
           retention-days: 1
@@ -110,3 +106,4 @@ jobs:
       image_name: ${{ inputs.repo }}
       tag_name: ${{ inputs.tag }}
       module_name: ${{ inputs.module_name }}
+      comp: ${{ inputs.comp }}

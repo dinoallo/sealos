@@ -11,9 +11,29 @@ on:
         type: string
         description: The name of the artifact to save
         default: sealos
-
+# TODO: upload binaries with versions
 jobs:
-  fetch-sealos:
+  check-if-exists:
+    runs-on: ubuntu-24.04
+    outputs:
+      exists: ${{ steps.check-artifact.outputs.result }}
+    steps:
+      - name: Check if artifact already exists
+        id: check-artifact
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data: artifacts } = await github.rest.actions.listArtifactsForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+            });
+            const artifactExists = artifacts.artifacts.some(artifact => artifact.name === '${{ inputs.artifact_name }}');
+            console.log(`Artifact exists: ${artifactExists}`);
+            return artifactExists;
+          result-encoding: string
+  upload:
+    needs: [check-if-exists]
+    if: ${{ needs.check-if-exists.outputs.exists }}
     runs-on: ubuntu-24.04
     steps:
       - name: Install sealos
@@ -26,3 +46,5 @@ jobs:
           name: ${{ inputs.artifact_name }}
           path: /usr/bin/sealos
           overwrite: true
+          if-no-files-found: error
+          retention-days: 1
