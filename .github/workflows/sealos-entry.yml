@@ -2,6 +2,12 @@ name: Default sealos workflow entry
 
 on:
   workflow_dispatch:
+    inputs:
+      push_image:
+        description: 'Push images'
+        required: false
+        default: false
+        type: boolean
   push:
     branches: [ "main" ]
     paths:
@@ -36,3 +42,134 @@ jobs:
       workdir: "lifecycle"
       module_path: ""
       version: "1.22"
+  call_ci_workflow:
+    uses: ./.github/workflows/build-sealos-image.yml
+    with:
+      arch: amd64,arm64
+      image: ${{ inputs.push_image }}
+  container-sealos:
+    permissions:
+      contents: read
+      packages: write
+    needs: [ call_ci_workflow ]
+    runs-on: ubuntu-24.04
+    if: ${{ (github.event_name == 'push') || (inputs.push_image == true) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Expose git commit data
+        uses: rlespinasse/git-commit-data-action@v1
+      - # Add support for more platforms with QEMU (optional)
+        # https://github.com/docker/setup-qemu-action
+        name: Set up QEMU
+        uses: docker/setup-qemu-action@v2
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Download sealos
+        uses: actions/download-artifact@v4
+        with:
+          name: sealos-amd64
+          path: docker/sealos/bin/sealos-amd64
+
+      - name: Download sealos
+        uses: actions/download-artifact@v4
+        with:
+          name: sealos-arm64
+          path: docker/sealos/bin/sealos-arm64
+
+      - name: build (and publish) main sealos image
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GIT_COMMIT_SHORT_SHA: ${{ env.GIT_COMMIT_SHORT_SHA }}
+          DOCKER_REPO: ghcr.io/${{ github.repository_owner }}/sealos
+        working-directory: lifecycle
+        run: |
+          docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          --label "org.opencontainers.image.source=https://github.com/${REPOSITORY_OWNER}/sealos" \
+          --label "org.opencontainers.image.description=sealos container image" \
+          --label "org.opencontainers.image.licenses=MIT" \
+          --push \
+          -t "${DOCKER_REPO}:${GIT_COMMIT_SHORT_SHA}" \
+          -f docker/sealos/Dockerfile.main \
+          .
+
+          docker buildx build \
+          --platform linux/amd64,linux/arm64 \
+          --label "org.opencontainers.image.source=https://github.com/${REPOSITORY_OWNER}/sealos" \
+          --label "org.opencontainers.image.description=sealos container image" \
+          --label "org.opencontainers.image.licenses=MIT" \
+          --push \
+          -t "${DOCKER_REPO}:latest" \
+          -f docker/sealos/Dockerfile.main \
+          .
+  save-sealos:
+    uses: ./.github/workflows/fetch-sealos.yml
+    with:
+      artifact_name: sealos
+  build-on-cluster-patch-image:
+    if: ${{ (github.event_name == 'push') || (inputs.push_image == true) }}
+    needs:
+      - call_ci_workflow
+      - save-sealos
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Download sealos
+        uses: actions/download-artifact@v4
+        with:
+          name: sealos
+          path: /tmp/
+      - name: Verify sealos
+        run: |
+          sudo chmod a+x /tmp/sealos
+          sudo mv /tmp/sealos /usr/bin/sealos
+          sudo sealos version
+      - name: Expose git commit data
+        uses: rlespinasse/git-commit-data-action@v1
+
+      - name: Download amd64 patch image tar
+        uses: actions/download-artifact@v4
+        with:
+          name: patch-image-amd64.tar
+          path: /tmp/sealos/images/
+      - name: Download arm64 patch image tar
+        uses: actions/download-artifact@v4
+        with:
+          name: patch-image-arm64.tar
+          path: /tmp/sealos/images/
+
+      - name: Manifest Cluster Images
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GH_PAT: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo sealos login -u "${REPOSITORY_OWNER}" -p "${GH_PAT}" --debug ghcr.io
+          sudo sealos load -i /tmp/sealos/images/patch-arm64.tar
+          sudo sealos load -i /tmp/sealos/images/patch-amd64.tar
+          sudo sealos images
+          bash scripts/manifest-cluster-images.sh
+
+      - name: Manifest Cluster Images for latest
+        env:
+          REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GIT_COMMIT_SHORT_SHA: ${{ env.GIT_COMMIT_SHORT_SHA }}
+        run: |
+          sudo sealos tag "ghcr.io/${REPOSITORY_OWNER}/sealos-patch:${GIT_COMMIT_SHORT_SHA}-amd64" "ghcr.io/${REPOSITORY_OWNER}/sealos-patch:latest-amd64"
+          sudo sealos tag "ghcr.io/${REPOSITORY_OWNER}/sealos-patch:${GIT_COMMIT_SHORT_SHA}-arm64" "ghcr.io/${REPOSITORY_OWNER}/sealos-patch:latest-arm64"
+          sudo sealos images
+          bash scripts/manifest-cluster-images.sh "ghcr.io/${REPOSITORY_OWNER}/sealos-patch:latest"
