@@ -64,6 +64,8 @@ jobs:
       - name: Fetch Current version
         id: get-current-tag
         uses: actions-ecosystem/action-get-latest-tag@v1.6.0
+        with:
+          semver_only: true
       - run: git fetch --prune --prune-tags
       - run: git tag -l 'v*'
       - name: Generator changelog
