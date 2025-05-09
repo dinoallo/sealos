@@ -64,3 +64,4 @@ All notable changes to this project will be documented in this file.
 - [CHANGELOG-4.1.0-rc1.md](./CHANGELOG-4.1.0-rc1.md)
 - [CHANGELOG-4.1.0.md](./CHANGELOG-4.1.0.md)
 - [CHANGELOG-4.0.0.md](./CHANGELOG-4.0.0.md)
+- [CHANGELOG-0.0.6-alpha.md](./CHANGELOG-0.0.6-alpha.md)
