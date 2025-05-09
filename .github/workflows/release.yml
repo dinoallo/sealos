@@ -61,27 +61,35 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Fetch Current version
-        id: get-current-tag
-        uses: actions-ecosystem/action-get-latest-tag@v1.6.0
-        with:
-          semver_only: true
-      - run: git fetch --prune --prune-tags
-      - run: git tag -l 'v*'
+      - name: Validate tag exists
+        if: startsWith(github.ref, 'refs/tags/v') == false
+        run: |
+          echo "::error::This workflow requires a version tag (vX.Y.Z)"
+          exit 1
+      - name: Check for version tag
+        id: check_tag
+        run: |
+          if [[ $GITHUB_REF == refs/tags/v* ]]; then
+            echo "tag=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+          fi
+      - name: Use the tag
+        if: steps.check_tag.outputs.tag
+        run: |
+          echo "Found tag: ${{ steps.check_tag.outputs.tag }}"
       - name: Generator changelog
         env:
           REPOSITORY: ${{ github.repository }}
         run: ./scripts/changelog.sh "${REPOSITORY}"
       - uses: peter-evans/create-pull-request@v5
         with:
-          title: 'docs: Automated Changelog Update for ${{steps.get-current-tag.outputs.tag }}'
+          title: 'docs: Automated Changelog Update for ${{steps.check_tag.outputs.tag }}'
           body: |
             copilot:all
             
             Automated changes by [create-pull-request](https://github.com/peter-evans/create-pull-request) GitHub action
           commit-message: |
-            🤖 add release changelog for ${{steps.get-current-tag.outputs.tag }}.
-          branch: changelog-${{steps.get-current-tag.outputs.tag }}
+            🤖 add release changelog for ${{steps.check_tag.outputs.tag }}.
+          branch: changelog-${{steps.check_tag.outputs.tag }}
           base: main
           signoff: true
           delete-branch: true
