@@ -80,7 +80,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
         run: ./scripts/changelog.sh "${REPOSITORY}"
-      - uses: peter-evans/create-pull-request@v5
+      - uses: peter-evans/create-pull-request@v7
         with:
           title: 'docs: Automated Changelog Update for ${{steps.check_tag.outputs.tag }}'
           body: |
