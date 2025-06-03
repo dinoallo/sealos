@@ -20,7 +20,18 @@ on:
       - "service/**"
       - "!**/*.md"
       - "!**/*.yaml"
-
+  workflow_dispatch:
+    inputs:
+      dispatch_push_image:
+        description: "Push image"
+        required: false
+        type: boolean
+        default: false
+      dispatch_push_image_tag:
+        description: "Push image tag"
+        default: "latest"
+        required: false
+        type: string
 
 jobs:
   fetch-sealos:
@@ -119,9 +130,11 @@ jobs:
     with:
       module_name: "${{ matrix.controller }}"
       module_path: "${{ matrix.controller }}"
-      push: ${{ github.event_name == 'push' || github.event_name == 'create' }}
+      push: ${{ github.event_name == 'push' || github.event_name == 'create' || inputs.dispatch_push_image }}
       workdir: "controllers"
       comp: "controller"
+      custom: ${{ inputs.dispatch_push_image }}
+      custom_tag: ${{ inputs.dispatch_push_image_tag }}
 
   job-controller-entry:
     needs: [fetch-sealos, detect-job-controller]
@@ -136,9 +149,12 @@ jobs:
     with:
       module_name: "job-${{ matrix.job }}"
       module_path: "job/${{ matrix.job }}"
-      push: ${{ github.event_name == 'push' || github.event_name == 'create' }}
+      push: ${{ github.event_name == 'push' || github.event_name == 'create' || inputs.dispatch_push_image }}
       workdir: "controllers"
       comp: "controller"
+      custom: ${{ inputs.dispatch_push_image }}
+      custom_tag: ${{ inputs.dispatch_push_image_tag }}
+
   db-controller-entry:
     needs: [fetch-sealos, detect-db-controller]
     if: ${{ needs.detect-db-controller.outputs.controllers != '[]' && needs.detect-db-controller.outputs.controllers != '' }}
@@ -154,9 +170,12 @@ jobs:
     with:
       module_name: "db-${{ matrix.controller }}"
       module_path: "db/${{ matrix.controller }}"
-      push: ${{ github.event_name == 'push' || github.event_name == 'create' }}
+      push: ${{ github.event_name == 'push' || github.event_name == 'create' || inputs.dispatch_push_image }}
       workdir: "controllers"
       comp: "controller"
+      custom: ${{ inputs.dispatch_push_image }}
+      custom_tag: ${{ inputs.dispatch_push_image_tag }}
+
   webhook-entry:
     needs: [fetch-sealos, detect-webhook]
     if: ${{ needs.detect-webhook.outputs.webhooks != '[]' && needs.detect-webhook.outputs.webhooks != '' }}
@@ -170,9 +189,11 @@ jobs:
     with:
       module_name: "${{ matrix.webhook }}"
       module_path: "${{ matrix.webhook }}"
-      push: ${{ github.event_name == 'push' || github.event_name == 'create' }}
+      push: ${{ github.event_name == 'push' || github.event_name == 'create' || inputs.dispatch_push_image }}
       workdir: "webhooks"
       comp: "webhook"
+      custom: ${{ inputs.dispatch_push_image }}
+      custom_tag: ${{ inputs.dispatch_push_image_tag }}
 
   service-entry:
     needs: [fetch-sealos, detect-service]
@@ -187,6 +208,8 @@ jobs:
     with:
       module_name: "${{ matrix.service }}"
       module_path: "${{ matrix.service }}"
-      push: ${{ github.event_name == 'push' || github.event_name == 'create' }}
+      push: ${{ github.event_name == 'push' || github.event_name == 'create' || inputs.dispatch_push_image }}
       workdir: "service"
       comp: "service"
+      custom: ${{ inputs.dispatch_push_image }}
+      custom_tag: ${{ inputs.dispatch_push_image_tag }}
