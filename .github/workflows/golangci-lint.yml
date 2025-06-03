@@ -6,7 +6,7 @@ on:
       version:
         required: false
         type: string
-        default: "1.22"
+        default: "stable"
       module_path:
         required: true
         type: string
@@ -22,13 +22,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-      - name: Setup Golang with cache
-        uses: magnetikonline/action-golang-cache@v5
+      - name: Setup Golang
+        uses: actions/setup-go@v5
         with:
           go-version: ${{ inputs.version }}
       - name: Run Linter
         uses: golangci/golangci-lint-action@v6
         with:
-          version: v1.64.5
+          version: v1.64
           working-directory: ${{ inputs.workdir }}/${{ inputs.module_path }}
-          args: "--out-${NO_FUTURE}format colored-line-number"
