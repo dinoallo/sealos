@@ -120,7 +120,11 @@ export default async function handler(req: NextApiRequest, resp: NextApiResponse
       }
       return callbackToUpdateBot(resp, {
         invoice: invoiceListData.data.invoices[0],
-        payments,
+        payments: payments.map((p) => ({
+          order_id: p.ID,
+          amount: p.Amount,
+          createdTime: p.CreatedAt
+        })),
         status
       });
     }
