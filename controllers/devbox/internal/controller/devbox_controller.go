@@ -188,9 +188,13 @@ func (r *DevboxReconciler) syncStartupConfigMap(ctx context.Context, devbox *dev
 	}
 	devboxConfigmap := &corev1.ConfigMap{
 		ObjectMeta: objectMeta,
+		Data:       make(map[string]string),
 	}
 
 	startupConfigMap := &corev1.ConfigMap{}
+	if r.StartupConfigMapName == "" || r.StartupConfigMapNamespace == "" {
+		return fmt.Errorf("startup configmap name or namespace is empty")
+	}
 	err := r.Get(ctx, client.ObjectKey{Namespace: r.StartupConfigMapNamespace, Name: r.StartupConfigMapName}, startupConfigMap)
 	if err != nil {
 		return fmt.Errorf("failed to get startup configmap: %w", err)
@@ -211,6 +215,10 @@ func (r *DevboxReconciler) syncStartupConfigMap(ctx context.Context, devbox *dev
 	}
 	if client.IgnoreNotFound(err) != nil {
 		return fmt.Errorf("failed to get configmap: %w", err)
+	}
+
+	if startupConfigMap.Data["startup.sh"] == "" {
+		return fmt.Errorf("startup configmap data startup.sh is empty")
 	}
 
 	configmap := &corev1.ConfigMap{
