@@ -2,6 +2,7 @@ package kubernetes
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -79,7 +80,10 @@ func TestDeleteStaticPodMissingContainerError(t *testing.T) {
 
 type stubSSH struct {
 	cmdToStringResponses map[string]string
+	cmdAsyncCalls        []string
 	copyCalls            []string
+	fetchCalls           []string
+	fetchContents        map[string]string
 	mu                   sync.Mutex
 }
 
@@ -92,9 +96,27 @@ func (s *stubSSH) Copy(host, src, dst string) error {
 	return nil
 }
 
-func (s *stubSSH) Fetch(host, src, dst string) error { return nil }
+func (s *stubSSH) Fetch(host, src, dst string) error {
+	s.mu.Lock()
+	s.fetchCalls = append(s.fetchCalls, host+"|"+src+"|"+dst)
+	contents := s.fetchContents[host+"|"+src]
+	s.mu.Unlock()
 
-func (s *stubSSH) CmdAsync(host string, cmds ...string) error { return nil }
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return err
+	}
+	if contents == "" {
+		contents = "fetched:" + host + ":" + src
+	}
+	return os.WriteFile(dst, []byte(contents), 0o600)
+}
+
+func (s *stubSSH) CmdAsync(host string, cmds ...string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cmdAsyncCalls = append(s.cmdAsyncCalls, host+"|"+strings.Join(cmds, "\n"))
+	return nil
+}
 
 func (s *stubSSH) CmdAsyncWithContext(ctx context.Context, host string, cmds ...string) error {
 	return nil

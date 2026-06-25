@@ -44,11 +44,100 @@ const (
 	KubeletConf    = "kubelet.conf"
 )
 
+type corePKIFile struct {
+	path string
+	mode os.FileMode
+}
+
+var corePKIFiles = []corePKIFile{
+	{path: "ca.crt", mode: 0o644},
+	{path: "ca.key", mode: 0o600},
+	{path: "front-proxy-ca.crt", mode: 0o644},
+	{path: "front-proxy-ca.key", mode: 0o600},
+	{path: "etcd/ca.crt", mode: 0o644},
+	{path: "etcd/ca.key", mode: 0o600},
+	{path: "sa.key", mode: 0o600},
+	{path: "sa.pub", mode: 0o644},
+}
+
 func (k *KubeadmRuntime) localKubeVersion() string {
 	if version := k.getKubeVersion(); version != "" {
 		return version
 	}
 	return k.getKubeVersionFromImage()
+}
+
+func (k *KubeadmRuntime) SyncPKI() error {
+	if err := k.syncMasterCorePKIToLocalSealosPKI(); err != nil {
+		return err
+	}
+	return k.syncMaster0CorePKIToControlNode()
+}
+
+func (k *KubeadmRuntime) syncMasterCorePKIToLocalSealosPKI() error {
+	for _, master := range k.getMasterIPAndPortList() {
+		if err := k.sshCmdAsync(master, buildSyncCorePKICommand(k.pathResolver.PkiPath())); err != nil {
+			return fmt.Errorf("sync core pki on master %s: %w", master, err)
+		}
+	}
+	return nil
+}
+
+func (k *KubeadmRuntime) syncMaster0CorePKIToControlNode() error {
+	for _, pkiFile := range corePKIFiles {
+		src := path.Join(kubernetesEtcPKI, pkiFile.path)
+		dst := filepath.Join(k.pathResolver.PkiPath(), filepath.FromSlash(pkiFile.path))
+		if err := k.fetchCorePKIFile(k.getMaster0IPAndPort(), src, dst, pkiFile.mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (k *KubeadmRuntime) fetchCorePKIFile(host, src, dst string, mode os.FileMode) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+		return fmt.Errorf("create local pki dir for %s: %w", dst, err)
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(dst), "."+filepath.Base(dst)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp file for %s: %w", dst, err)
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temp file for %s: %w", dst, err)
+	}
+	_ = os.Remove(tmpPath)
+
+	if err := k.sshFetch(host, src, tmpPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("fetch %s from master0: %w", src, err)
+	}
+	if err := os.Chmod(tmpPath, mode); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("chmod fetched pki file %s: %w", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, dst); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("replace local pki file %s: %w", dst, err)
+	}
+	return nil
+}
+
+func buildSyncCorePKICommand(localPKIPath string) string {
+	var script strings.Builder
+	script.WriteString("set -e\n")
+	for _, pkiFile := range corePKIFiles {
+		src := path.Join(kubernetesEtcPKI, pkiFile.path)
+		dst := path.Join(localPKIPath, pkiFile.path)
+		script.WriteString(fmt.Sprintf("mkdir -p %s\n", shellQuote(path.Dir(dst))))
+		script.WriteString(fmt.Sprintf("cp -p %s %s\n", shellQuote(src), shellQuote(dst)))
+	}
+	return fmt.Sprintf("bash -c %s", shellQuote(script.String()))
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func (k *KubeadmRuntime) Renew(opts runtime.CertRenewOptions) error {

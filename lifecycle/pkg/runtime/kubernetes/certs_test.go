@@ -1,6 +1,14 @@
 package kubernetes
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+
+	"github.com/labring/sealos/pkg/constants"
+)
 
 func TestValidateRenewGroups(t *testing.T) {
 	tests := []struct {
@@ -166,4 +174,112 @@ func TestValidateRenewGroupsAllowsAll(t *testing.T) {
 	if err := validateRenewGroups([]string{"all"}, true, []string{"custom:group"}); err != nil {
 		t.Fatalf("validateRenewGroups(all) error = %v", err)
 	}
+}
+
+func TestBuildSyncCorePKICommandIncludesOnlyCoreFiles(t *testing.T) {
+	cmd := buildSyncCorePKICommand("/var/lib/sealos/default/pki")
+	for _, want := range []string{
+		"/etc/kubernetes/pki/ca.crt",
+		"/etc/kubernetes/pki/ca.key",
+		"/etc/kubernetes/pki/front-proxy-ca.crt",
+		"/etc/kubernetes/pki/front-proxy-ca.key",
+		"/etc/kubernetes/pki/etcd/ca.crt",
+		"/etc/kubernetes/pki/etcd/ca.key",
+		"/etc/kubernetes/pki/sa.key",
+		"/etc/kubernetes/pki/sa.pub",
+		"/var/lib/sealos/default/pki/etcd",
+	} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("buildSyncCorePKICommand() missing %q in %q", want, cmd)
+		}
+	}
+	for _, unwanted := range []string{
+		"apiserver.crt",
+		"apiserver.key",
+		"apiserver-kubelet-client.crt",
+		"etcd/peer.crt",
+		"etcd/server.crt",
+	} {
+		if strings.Contains(cmd, unwanted) {
+			t.Fatalf("buildSyncCorePKICommand() contains leaf cert %q in %q", unwanted, cmd)
+		}
+	}
+}
+
+func TestSyncPKISyncsMastersAndFetchesMaster0ToControlNode(t *testing.T) {
+	rootDir := t.TempDir()
+	prevRuntimeRoot := constants.DefaultRuntimeRootDir
+	constants.DefaultRuntimeRootDir = rootDir
+	t.Cleanup(func() {
+		constants.DefaultRuntimeRootDir = prevRuntimeRoot
+	})
+
+	stub := &stubSSH{fetchContents: map[string]string{}}
+	for _, pkiFile := range corePKIFiles {
+		stub.fetchContents["master0|"+pathJoinPKI(pkiFile.path)] = "master0:" + pkiFile.path
+	}
+
+	rt := &KubeadmRuntime{
+		execer:       stub,
+		cluster:      testCluster([]string{"master0", "master1"}),
+		pathResolver: constants.NewPathResolver("test-cluster"),
+	}
+
+	existingCA := filepath.Join(rootDir, "test-cluster", "pki", "ca.crt")
+	if err := os.MkdirAll(filepath.Dir(existingCA), 0o755); err != nil {
+		t.Fatalf("mkdir existing pki dir: %v", err)
+	}
+	if err := os.WriteFile(existingCA, []byte("old-ca"), 0o644); err != nil {
+		t.Fatalf("write existing ca: %v", err)
+	}
+
+	if err := rt.SyncPKI(); err != nil {
+		t.Fatalf("SyncPKI() error = %v", err)
+	}
+
+	if len(stub.cmdAsyncCalls) != 2 {
+		t.Fatalf("SyncPKI() cmdAsyncCalls = %v, want two master sync commands", stub.cmdAsyncCalls)
+	}
+	for _, master := range []string{"master0", "master1"} {
+		found := false
+		for _, call := range stub.cmdAsyncCalls {
+			if strings.HasPrefix(call, master+"|") &&
+				strings.Contains(call, "/etc/kubernetes/pki/ca.crt") &&
+				strings.Contains(call, filepath.Join(rootDir, "test-cluster", "pki", "ca.crt")) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("SyncPKI() missing remote sync command for %s in %v", master, stub.cmdAsyncCalls)
+		}
+	}
+
+	wantFetches := make([]string, 0, len(corePKIFiles))
+	for _, pkiFile := range corePKIFiles {
+		wantFetches = append(wantFetches, "master0|"+pathJoinPKI(pkiFile.path)+"|")
+		gotPath := filepath.Join(rootDir, "test-cluster", "pki", filepath.FromSlash(pkiFile.path))
+		got, err := os.ReadFile(gotPath)
+		if err != nil {
+			t.Fatalf("ReadFile(%s) error = %v", gotPath, err)
+		}
+		if string(got) != "master0:"+pkiFile.path {
+			t.Fatalf("local synced file %s = %q, want %q", gotPath, string(got), "master0:"+pkiFile.path)
+		}
+	}
+	gotFetches := append([]string{}, stub.fetchCalls...)
+	sort.Strings(gotFetches)
+	sort.Strings(wantFetches)
+	if len(gotFetches) != len(wantFetches) {
+		t.Fatalf("SyncPKI() fetchCalls = %v, want %v", gotFetches, wantFetches)
+	}
+	for i := range wantFetches {
+		if !strings.HasPrefix(gotFetches[i], wantFetches[i]) {
+			t.Fatalf("SyncPKI() fetchCalls = %v, want prefixes %v", gotFetches, wantFetches)
+		}
+	}
+}
+
+func pathJoinPKI(p string) string {
+	return "/etc/kubernetes/pki/" + p
 }

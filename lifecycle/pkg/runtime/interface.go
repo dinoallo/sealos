@@ -35,6 +35,7 @@ type CertRenewOptions struct {
 
 type CertManager interface {
 	Renew(opts CertRenewOptions) error
+	SyncPKI() error
 	UpdateCertSANs(certSANs []string) error
 }
 

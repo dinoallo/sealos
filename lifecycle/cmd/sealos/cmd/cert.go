@@ -36,6 +36,7 @@ func newCertCmd() *cobra.Command {
 	var altNames []string
 	var renewTargets []string
 	var groups []string
+	var syncPKI bool
 
 	cmd := &cobra.Command{
 		Use:   "cert",
@@ -52,14 +53,21 @@ func newCertCmd() *cobra.Command {
     3. kubectl get pod, to check if it works or not
 		`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if len(renewTargets) != 0 {
+			if syncPKI {
+				if len(altNames) != 0 {
+					return errors.New("--alt-names and --sync cannot be used together")
+				}
+				if len(renewTargets) != 0 {
+					return errors.New("--renew and --sync cannot be used together")
+				}
+			} else if len(renewTargets) != 0 {
 				if len(altNames) != 0 {
 					return errors.New("--alt-names and --renew cannot be used together")
 				}
 			} else if len(altNames) == 0 {
-				return errors.New("--alt-names is required unless --renew is set")
+				return errors.New("--alt-names is required unless --renew or --sync is set")
 			}
-			if cmd.Flags().Changed("groups") && len(renewTargets) == 0 {
+			if cmd.Flags().Changed("groups") && (len(renewTargets) == 0 || syncPKI) {
 				return errors.New("--groups requires --renew")
 			}
 
@@ -99,6 +107,10 @@ func newCertCmd() *cobra.Command {
 				return fmt.Errorf("create runtime failed: %v", err)
 			}
 			if cm, ok := rt.(runtime.CertManager); ok {
+				if syncPKI {
+					logger.Info("using %s cert pki sync implement", cf.GetCluster().GetDistribution())
+					return cm.SyncPKI()
+				}
 				if len(renewTargets) != 0 {
 					renewOpts := runtime.CertRenewOptions{Targets: renewTargets}
 					if cmd.Flags().Changed("groups") {
@@ -113,6 +125,9 @@ func newCertCmd() *cobra.Command {
 			if len(renewTargets) != 0 {
 				return fmt.Errorf("renew targets %v are not supported for distribution %s", renewTargets, cf.GetCluster().GetDistribution())
 			}
+			if syncPKI {
+				return fmt.Errorf("cert pki sync is not supported for distribution %s", cf.GetCluster().GetDistribution())
+			}
 			return nil
 		},
 	}
@@ -120,6 +135,7 @@ func newCertCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&altNames, "alt-names", []string{}, "add extra Subject Alternative Names for certs, domain or ip, eg. sealos.io or 10.103.97.2")
 	cmd.Flags().StringSliceVar(&renewTargets, "renew", nil, "renew local cert targets; local admin.conf is synced to node $HOME/.kube/config, super-admin.conf stays local only")
 	cmd.Flags().StringSliceVar(&groups, "groups", nil, "override admin kubeconfig certificate groups when renewing admin.conf or all")
+	cmd.Flags().BoolVar(&syncPKI, "sync", false, "sync core CA and service-account keys from each master's /etc/kubernetes/pki to its local sealos pki; master0 is also synced to this node")
 
 	return cmd
 }
