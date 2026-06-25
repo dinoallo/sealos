@@ -37,6 +37,7 @@ func newCertCmd() *cobra.Command {
 	var renewTargets []string
 	var groups []string
 	var syncPKI bool
+	var syncDirection string
 
 	cmd := &cobra.Command{
 		Use:   "cert",
@@ -54,6 +55,9 @@ func newCertCmd() *cobra.Command {
 		`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if syncPKI {
+				if syncDirection != string(runtime.SyncPKIDirectionK8sToSealos) && syncDirection != string(runtime.SyncPKIDirectionSealosToK8s) {
+					return errors.New("--sync-direction must be k8s-to-sealos or sealos-to-k8s")
+				}
 				if len(altNames) != 0 {
 					return errors.New("--alt-names and --sync cannot be used together")
 				}
@@ -109,7 +113,7 @@ func newCertCmd() *cobra.Command {
 			if cm, ok := rt.(runtime.CertManager); ok {
 				if syncPKI {
 					logger.Info("using %s cert pki sync implement", cf.GetCluster().GetDistribution())
-					return cm.SyncPKI()
+					return cm.SyncPKI(runtime.SyncPKIDirection(syncDirection))
 				}
 				if len(renewTargets) != 0 {
 					renewOpts := runtime.CertRenewOptions{Targets: renewTargets}
@@ -135,7 +139,8 @@ func newCertCmd() *cobra.Command {
 	cmd.Flags().StringSliceVar(&altNames, "alt-names", []string{}, "add extra Subject Alternative Names for certs, domain or ip, eg. sealos.io or 10.103.97.2")
 	cmd.Flags().StringSliceVar(&renewTargets, "renew", nil, "renew local cert targets; local admin.conf is synced to node $HOME/.kube/config, super-admin.conf stays local only")
 	cmd.Flags().StringSliceVar(&groups, "groups", nil, "override admin kubeconfig certificate groups when renewing admin.conf or all")
-	cmd.Flags().BoolVar(&syncPKI, "sync", false, "sync core CA and service-account keys from each master's /etc/kubernetes/pki to its local sealos pki; master0 is also synced to this node")
+	cmd.Flags().BoolVar(&syncPKI, "sync", false, "sync core CA and service-account keys between each master's /etc/kubernetes/pki and its local sealos pki")
+	cmd.Flags().StringVar(&syncDirection, "sync-direction", string(runtime.SyncPKIDirectionSealosToK8s), "sync direction when using --sync: sealos-to-k8s (push from sealos to k8s, default) or k8s-to-sealos (pull from k8s to sealos)")
 
 	return cmd
 }

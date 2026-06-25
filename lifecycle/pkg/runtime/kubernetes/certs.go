@@ -67,11 +67,51 @@ func (k *KubeadmRuntime) localKubeVersion() string {
 	return k.getKubeVersionFromImage()
 }
 
-func (k *KubeadmRuntime) SyncPKI() error {
+func (k *KubeadmRuntime) SyncPKI(direction runtime.SyncPKIDirection) error {
+	switch direction {
+	case runtime.SyncPKIDirectionK8sToSealos:
+		return k.syncK8sPKIToSealosPKI()
+	case runtime.SyncPKIDirectionSealosToK8s:
+		return k.syncSealosPKIToK8sPKI()
+	default:
+		return fmt.Errorf("unsupported sync direction %q", direction)
+	}
+}
+
+func (k *KubeadmRuntime) syncK8sPKIToSealosPKI() error {
 	if err := k.syncMasterCorePKIToLocalSealosPKI(); err != nil {
 		return err
 	}
 	return k.syncMaster0CorePKIToControlNode()
+}
+
+func (k *KubeadmRuntime) syncSealosPKIToK8sPKI() error {
+	if err := k.pushControlNodeCorePKIToMasters(); err != nil {
+		return err
+	}
+	return k.syncMasterSealosPKIToK8sPKI()
+}
+
+func (k *KubeadmRuntime) pushControlNodeCorePKIToMasters() error {
+	for _, master := range k.getMasterIPAndPortList() {
+		for _, pkiFile := range corePKIFiles {
+			src := filepath.Join(k.pathResolver.PkiPath(), filepath.FromSlash(pkiFile.path))
+			dst := path.Join(k.pathResolver.PkiPath(), pkiFile.path)
+			if err := k.sshCopy(master, src, dst); err != nil {
+				return fmt.Errorf("push %s to master %s sealos pki: %w", pkiFile.path, master, err)
+			}
+		}
+	}
+	return nil
+}
+
+func (k *KubeadmRuntime) syncMasterSealosPKIToK8sPKI() error {
+	for _, master := range k.getMasterIPAndPortList() {
+		if err := k.sshCmdAsync(master, buildSyncSealosPKIToK8sCommand(k.pathResolver.PkiPath())); err != nil {
+			return fmt.Errorf("sync sealos pki to k8s pki on master %s: %w", master, err)
+		}
+	}
+	return nil
 }
 
 func (k *KubeadmRuntime) syncMasterCorePKIToLocalSealosPKI() error {
@@ -130,6 +170,18 @@ func buildSyncCorePKICommand(localPKIPath string) string {
 	for _, pkiFile := range corePKIFiles {
 		src := path.Join(kubernetesEtcPKI, pkiFile.path)
 		dst := path.Join(localPKIPath, pkiFile.path)
+		script.WriteString(fmt.Sprintf("mkdir -p %s\n", shellQuote(path.Dir(dst))))
+		script.WriteString(fmt.Sprintf("cp -p %s %s\n", shellQuote(src), shellQuote(dst)))
+	}
+	return fmt.Sprintf("bash -c %s", shellQuote(script.String()))
+}
+
+func buildSyncSealosPKIToK8sCommand(localPKIPath string) string {
+	var script strings.Builder
+	script.WriteString("set -e\n")
+	for _, pkiFile := range corePKIFiles {
+		src := path.Join(localPKIPath, pkiFile.path)
+		dst := path.Join(kubernetesEtcPKI, pkiFile.path)
 		script.WriteString(fmt.Sprintf("mkdir -p %s\n", shellQuote(path.Dir(dst))))
 		script.WriteString(fmt.Sprintf("cp -p %s %s\n", shellQuote(src), shellQuote(dst)))
 	}

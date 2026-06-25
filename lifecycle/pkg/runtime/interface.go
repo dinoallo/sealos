@@ -28,6 +28,13 @@ type Ruler interface {
 	SyncNodeIPVS(masters, nodes []string) error
 }
 
+type SyncPKIDirection string
+
+const (
+	SyncPKIDirectionK8sToSealos SyncPKIDirection = "k8s-to-sealos"
+	SyncPKIDirectionSealosToK8s SyncPKIDirection = "sealos-to-k8s"
+)
+
 type CertRenewOptions struct {
 	Targets []string
 	Groups  []string
@@ -35,7 +42,7 @@ type CertRenewOptions struct {
 
 type CertManager interface {
 	Renew(opts CertRenewOptions) error
-	SyncPKI() error
+	SyncPKI(direction SyncPKIDirection) error
 	UpdateCertSANs(certSANs []string) error
 }
 
