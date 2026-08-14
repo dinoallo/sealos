@@ -74,6 +74,37 @@ sealos distribution install cloud@v5.1.0
 Use `--interactive=false` with `--masters` and `--cloud-domain` for automation. The legacy
 `scripts/cloud/install-v2.sh` entrypoint remains as a compatibility wrapper and forwards to this command.
 
+Distribution entries reference versioned packages. A package can declare a remote OCI image and, when source is
+available, a local or Git build source. Remote images are the default resolution mode; source builds are explicit:
+
+```shell
+sealos distribution install cloud@v5.1.0 --package-mode remote
+sealos distribution install <distribution@version> --package-mode source
+sealos distribution install <distribution@version> --package-mode hybrid
+```
+
+`source` remains supported for legacy packages. New packages should use ordered `sources`: the first available local
+checkout is preferred, and a Git source is cloned automatically when the local checkout is unavailable. `source.path`
+is the package's own source checkout; use an absolute path when packages live in different repositories. Each Git
+source is cached persistently and can be overridden with `--source-cache` or `SEALOS_V2_SOURCE_CACHE`.
+
+```yaml
+sources:
+  - type: local
+    path: /path/to/sealos-cloud-user-controller
+    context: deploy
+    file: Kubefile
+  - type: git
+    url: https://github.com/labring/sealos-cloud-user-controller.git
+    ref: v5.1.0
+    context: deploy
+    file: Kubefile
+```
+
+`--source-root` is only a compatibility base for legacy manifests with relative local paths. `source` mode requires
+every package to resolve to source. `hybrid` mode builds packages with available source and uses their remote image
+for packages without source metadata. Core images whose build sources are not published remain remote-only.
+
 ## Customizing the Cluster
 
 For cluster images not available in the Sealos ecosystem, users can easily build and customize their own cluster images.

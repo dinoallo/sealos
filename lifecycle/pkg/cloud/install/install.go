@@ -37,12 +37,14 @@ const (
 	DefaultCloudPort    = 443
 	DefaultSSHPort      = 22
 	DefaultWaitTimeout  = 30 * time.Minute
-	cloudImageCount     = 31
 )
 
 // Config contains the inputs required by the Sealos Cloud installer.
 type Config struct {
 	Distribution string
+	PackageMode  distribution.ResolveMode
+	SourceRoot   string
+	SourceCache  string
 	Masters      string
 	Nodes        string
 
@@ -79,11 +81,16 @@ func DefaultConfig() Config {
 		home = "/root"
 	}
 	return Config{
-		Distribution:         DefaultDistribution,
-		User:                 "root",
-		SSHKey:               filepath.Join(home, ".ssh", "id_rsa"),
-		SSHPort:              DefaultSSHPort,
-		RegistryPass:         DefaultRegistryPass,
+		Distribution: DefaultDistribution,
+		User:         "root",
+		SSHKey:       filepath.Join(home, ".ssh", "id_rsa"),
+		SSHPort:      DefaultSSHPort,
+		RegistryPass: DefaultRegistryPass,
+		PackageMode:  distribution.ResolveRemote,
+		// Absolute local source paths are owned by individual packages. This
+		// remains a fallback for legacy manifests that use relative paths.
+		SourceRoot:           currentDirectory(),
+		SourceCache:          distribution.DefaultSourceCache(),
 		CloudPort:            DefaultCloudPort,
 		MaxPods:              120,
 		OpenEBSStorage:       "/var/openebs",
@@ -95,6 +102,14 @@ func DefaultConfig() Config {
 		ConfigDir:            filepath.Join(home, ".sealos", "cloud"),
 		WaitTimeout:          DefaultWaitTimeout,
 	}
+}
+
+func currentDirectory() string {
+	directory, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	return directory
 }
 
 // ConfigFromEnv keeps install-v2.sh users compatible while the CLI becomes the
@@ -139,6 +154,9 @@ func ConfigFromEnv(lookup func(string) (string, bool)) Config {
 	}
 
 	setString("SEALOS_V2_DISTRIBUTION", &cfg.Distribution)
+	setString("SEALOS_V2_PACKAGE_MODE", (*string)(&cfg.PackageMode))
+	setString("SEALOS_V2_SOURCE_ROOT", &cfg.SourceRoot)
+	setString("SEALOS_V2_SOURCE_CACHE", &cfg.SourceCache)
 	setString("SEALOS_V2_MASTERS", &cfg.Masters)
 	setString("SEALOS_V2_NODES", &cfg.Nodes)
 	setString("SEALOS_V2_SSH_KEY", &cfg.SSHKey)
@@ -165,6 +183,9 @@ func ConfigFromEnv(lookup func(string) (string, bool)) Config {
 func (c Config) Validate() error {
 	if strings.TrimSpace(c.Distribution) == "" {
 		return errors.New("distribution is required")
+	}
+	if c.PackageMode != distribution.ResolveRemote && c.PackageMode != distribution.ResolveSource && c.PackageMode != distribution.ResolveHybrid {
+		return fmt.Errorf("unsupported package mode %q", c.PackageMode)
 	}
 	if strings.TrimSpace(c.Masters) == "" {
 		return errors.New("masters are required")
@@ -248,27 +269,77 @@ type Images struct {
 }
 
 func ResolveImages(manifest *distribution.Manifest) (Images, error) {
+	images, _, err := ResolveImagesWithOptions(manifest, distribution.ResolveOptions{Mode: distribution.ResolveRemote})
+	return images, err
+}
+
+func ResolveImagesWithOptions(manifest *distribution.Manifest, options distribution.ResolveOptions) (Images, []distribution.BuildPlan, error) {
 	if manifest == nil {
-		return Images{}, errors.New("distribution manifest is nil")
+		return Images{}, nil, errors.New("distribution manifest is nil")
 	}
 	if manifest.Name != "cloud" {
-		return Images{}, fmt.Errorf("distribution %s is not supported by the cloud installer", manifest.Ref())
+		return Images{}, nil, fmt.Errorf("distribution %s is not supported by the cloud installer", manifest.Ref())
 	}
-	if len(manifest.Images) != cloudImageCount {
-		return Images{}, fmt.Errorf("distribution %s contains %d images; cloud installer requires %d ordered images", manifest.Ref(), len(manifest.Images), cloudImageCount)
+	resolved, err := distribution.ResolvePackages(manifest, options)
+	if err != nil {
+		return Images{}, nil, err
 	}
-	v := manifest.Images
-	return Images{
-		Kubernetes: v[0], Cilium: v[1], CertManager: v[2], Helm: v[3], OpenEBS: v[4],
-		Higress: v[5], KubeBlocks: v[6], Cockroach: v[7], MetricsServer: v[8],
-		VictoriaMetricsKubernetesStack: v[9], Cloud: v[10], Finish: v[11], Certs: v[12],
-		CloudDesktopFrontend: v[13], CloudUserController: v[14], CloudTerminalController: v[15],
-		CloudAppController: v[16], CloudResourcesController: v[17], CloudAccountController: v[18],
-		CloudAccountService: v[19], CloudLicenseController: v[20], CloudJobInitController: v[21],
-		CloudJobHeartbeatController: v[22], CloudApplaunchpadFrontend: v[23], CloudTerminalFrontend: v[24],
-		CloudDBProviderFrontend: v[25], CloudCostCenterFrontend: v[26], CloudTemplateFrontend: v[27],
-		CloudLicenseFrontend: v[28], CloudDatabaseService: v[29], CloudLaunchpadService: v[30],
-	}, nil
+
+	var images Images
+	assign := []struct {
+		name   string
+		target *string
+	}{
+		{"kubernetes", &images.Kubernetes}, {"cilium", &images.Cilium}, {"cert-manager", &images.CertManager},
+		{"helm", &images.Helm}, {"openebs", &images.OpenEBS}, {"higress", &images.Higress},
+		{"kubeblocks", &images.KubeBlocks}, {"cockroach", &images.Cockroach}, {"metrics-server", &images.MetricsServer},
+		{"victoria-metrics-k8s-stack", &images.VictoriaMetricsKubernetesStack}, {"sealos-cloud", &images.Cloud},
+		{"sealos-finish", &images.Finish}, {"sealos-certs", &images.Certs},
+		{"sealos-cloud-desktop-frontend", &images.CloudDesktopFrontend}, {"sealos-cloud-user-controller", &images.CloudUserController},
+		{"sealos-cloud-terminal-controller", &images.CloudTerminalController}, {"sealos-cloud-app-controller", &images.CloudAppController},
+		{"sealos-cloud-resources-controller", &images.CloudResourcesController}, {"sealos-cloud-account-controller", &images.CloudAccountController},
+		{"sealos-cloud-account-service", &images.CloudAccountService}, {"sealos-cloud-license-controller", &images.CloudLicenseController},
+		{"sealos-cloud-job-init-controller", &images.CloudJobInitController}, {"sealos-cloud-job-heartbeat-controller", &images.CloudJobHeartbeatController},
+		{"sealos-cloud-applaunchpad-frontend", &images.CloudApplaunchpadFrontend}, {"sealos-cloud-terminal-frontend", &images.CloudTerminalFrontend},
+		{"sealos-cloud-dbprovider-frontend", &images.CloudDBProviderFrontend}, {"sealos-cloud-costcenter-frontend", &images.CloudCostCenterFrontend},
+		{"sealos-cloud-template-frontend", &images.CloudTemplateFrontend}, {"sealos-cloud-license-frontend", &images.CloudLicenseFrontend},
+		{"sealos-cloud-database-service", &images.CloudDatabaseService}, {"sealos-cloud-launchpad-service", &images.CloudLaunchpadService},
+	}
+	byName := make(map[string]distribution.ResolvedPackage, len(resolved))
+	for index, item := range resolved {
+		name := item.Package.Name
+		if len(manifest.Packages) == 0 {
+			if index >= len(assign) {
+				return Images{}, nil, fmt.Errorf("distribution %s contains %d images; cloud installer requires %d ordered packages", manifest.Ref(), len(resolved), len(assign))
+			}
+			name = assign[index].name
+		}
+		if _, exists := byName[name]; exists {
+			return Images{}, nil, fmt.Errorf("distribution %s contains duplicate package name %q", manifest.Ref(), name)
+		}
+		byName[name] = item
+	}
+	get := func(name string) (string, error) {
+		item, ok := byName[name]
+		if !ok {
+			return "", fmt.Errorf("distribution %s is missing package %q", manifest.Ref(), name)
+		}
+		return item.Image, nil
+	}
+	for _, item := range assign {
+		image, err := get(item.name)
+		if err != nil {
+			return Images{}, nil, err
+		}
+		*item.target = image
+	}
+	plans := make([]distribution.BuildPlan, 0)
+	for _, item := range resolved {
+		if item.Build != nil {
+			plans = append(plans, *item.Build)
+		}
+	}
+	return images, plans, nil
 }
 
 func (i Images) RewriteProxy() Images {
@@ -299,6 +370,7 @@ func (i Images) RewriteProxy() Images {
 type Command struct {
 	Name string
 	Args []string
+	Dir  string
 }
 
 func (c Command) String() string {
@@ -320,6 +392,9 @@ func (c Command) RedactedString() string {
 			continue
 		}
 		if args[index] == "--env" && index+1 < len(args) {
+			args[index+1] = redactEnv(args[index+1])
+		}
+		if args[index] == "--build-arg" && index+1 < len(args) {
 			args[index+1] = redactEnv(args[index+1])
 		}
 	}
@@ -369,6 +444,7 @@ func (r *CommandRunner) command(ctx context.Context, command Command) *osExec.Cm
 		name = r.SealosPath
 	}
 	cmd := osExec.CommandContext(ctx, name, command.Args...)
+	cmd.Dir = command.Dir
 	cmd.Stdout = r.Stdout
 	cmd.Stderr = r.Stderr
 	cmd.Stdin = os.Stdin
@@ -397,7 +473,16 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	if err := i.Config.Validate(); err != nil {
 		return err
 	}
-	images, err := ResolveImages(manifest)
+	workDir := i.Config.ConfigDir
+	if _, err := os.Stat(workDir); errors.Is(err, os.ErrNotExist) {
+		workDir = os.TempDir()
+	}
+	images, buildPlans, err := ResolveImagesWithOptions(manifest, distribution.ResolveOptions{
+		Mode:        i.Config.PackageMode,
+		SourceRoot:  i.Config.SourceRoot,
+		SourceCache: i.Config.SourceCache,
+		WorkDir:     workDir,
+	})
 	if err != nil {
 		return err
 	}
@@ -412,8 +497,18 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 			return fmt.Errorf("create installer config directory: %w", err)
 		}
 	}
+	for _, plan := range buildPlans {
+		if plan.CleanupDir != "" {
+			defer os.RemoveAll(plan.CleanupDir)
+		}
+		for _, command := range plan.Commands {
+			if err := i.run(ctx, Command{Name: command.Name, Args: command.Args, Dir: command.Dir}); err != nil {
+				return err
+			}
+		}
+	}
 
-	if i.Config.Proxy {
+	if i.Config.Proxy && i.Config.PackageMode == distribution.ResolveRemote {
 		images = images.RewriteProxy()
 	}
 	installed, ready := i.clusterStatus(ctx)

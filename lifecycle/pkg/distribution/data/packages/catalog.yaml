@@ -1,0 +1,511 @@
+packages:
+  - name: kubernetes
+    version: v1.28.15
+    remote:
+      image: ghcr.io/labring/sealos/kubernetes:v1.28.15
+  - name: cilium
+    version: v1.17.1
+    remote:
+      image: ghcr.io/labring/sealos/cilium:v1.17.1
+  - name: cert-manager
+    version: v1.14.6
+    remote:
+      image: ghcr.io/labring/sealos/cert-manager:v1.14.6
+  - name: helm
+    version: v3.16.2
+    remote:
+      image: ghcr.io/labring/sealos/helm:v3.16.2
+  - name: openebs
+    version: v3.10.0
+    remote:
+      image: ghcr.io/labring/sealos/openebs:v3.10.0
+  - name: higress
+    version: v2.1.3
+    remote:
+      image: ghcr.io/labring/sealos/higress:v2.1.3
+  - name: kubeblocks
+    version: v0.8.2
+    remote:
+      image: ghcr.io/labring/sealos/kubeblocks:v0.8.2
+  - name: cockroach
+    version: v2.12.0
+    remote:
+      image: ghcr.io/labring/sealos/cockroach:v2.12.0
+  - name: metrics-server
+    version: v0.6.4
+    remote:
+      image: ghcr.io/labring/sealos/metrics-server:v0.6.4
+  - name: victoria-metrics-k8s-stack
+    version: v1.124.0
+    remote:
+      image: ghcr.io/labring/sealos/victoria-metrics-k8s-stack:v1.124.0
+  - name: sealos-cloud
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud:v5.1.0
+  - name: sealos-finish
+    version: v0.1.0
+    remote:
+      image: ghcr.io/labring/sealos/sealos-finish:v0.1.0
+  - name: sealos-certs
+    version: v0.1.0
+    remote:
+      image: ghcr.io/labring/sealos/sealos-certs:v0.1.0
+  - name: sealos-cloud-desktop-frontend
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-desktop-frontend:v5.1.0
+    sources:
+      - type: local
+        path: frontend/desktop/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: frontend/desktop/deploy
+        file: Kubefile
+  - name: sealos-cloud-user-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-user-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/user/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/user/deploy
+        file: Kubefile
+  - name: sealos-cloud-terminal-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-terminal-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/terminal/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/terminal/deploy
+        file: Kubefile
+  - name: sealos-cloud-app-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-app-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/app/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/app/deploy
+        file: Kubefile
+  - name: sealos-cloud-resources-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-resources-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/resources/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/resources/deploy
+        file: Kubefile
+  - name: sealos-cloud-account-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-account-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/account/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/account/deploy
+        file: Kubefile
+  - name: sealos-cloud-account-service
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-account-service:v5.1.0
+    sources:
+      - type: local
+        path: service/account/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: service/account/deploy
+        file: Kubefile
+  - name: sealos-cloud-license-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-license-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/license/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/license/deploy
+        file: Kubefile
+  - name: sealos-cloud-job-init-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-job-init-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/job/init/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/job/init/deploy
+        file: Kubefile
+  - name: sealos-cloud-job-heartbeat-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-job-heartbeat-controller:v5.1.0
+    sources:
+      - type: local
+        path: controllers/job/heartbeat/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: controllers/job/heartbeat/deploy
+        file: Kubefile
+  - name: sealos-cloud-applaunchpad-frontend
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-applaunchpad-frontend:v5.1.0
+    sources:
+      - type: local
+        path: frontend/providers/applaunchpad/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: frontend/providers/applaunchpad/deploy
+        file: Kubefile
+  - name: sealos-cloud-terminal-frontend
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-terminal-frontend:v5.1.0
+    sources:
+      - type: local
+        path: frontend/providers/terminal/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: frontend/providers/terminal/deploy
+        file: Kubefile
+  - name: sealos-cloud-dbprovider-frontend
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-dbprovider-frontend:v5.1.0
+    sources:
+      - type: local
+        path: frontend/providers/dbprovider/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: frontend/providers/dbprovider/deploy
+        file: Kubefile
+  - name: sealos-cloud-costcenter-frontend
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-costcenter-frontend:v5.1.0
+    sources:
+      - type: local
+        path: frontend/providers/costcenter/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: frontend/providers/costcenter/deploy
+        file: Kubefile
+  - name: sealos-cloud-template-frontend
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-template-frontend:v5.1.0
+    sources:
+      - type: local
+        path: frontend/providers/template/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: frontend/providers/template/deploy
+        file: Kubefile
+  - name: sealos-cloud-license-frontend
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-license-frontend:v5.1.0
+    sources:
+      - type: local
+        path: frontend/providers/license/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: frontend/providers/license/deploy
+        file: Kubefile
+  - name: sealos-cloud-database-service
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-database-service:v5.1.0
+    sources:
+      - type: local
+        path: service/database/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: service/database/deploy
+        file: Kubefile
+  - name: sealos-cloud-launchpad-service
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-launchpad-service:v5.1.0
+    sources:
+      - type: local
+        path: service/launchpad/deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos.git
+        ref: v5.1.0
+        context: service/launchpad/deploy
+        file: Kubefile
+  - name: sealos-pro-kubernetes
+    version: v1.28.15
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:kubernetes-v1.28.15
+  - name: sealos-pro-cilium
+    version: v1.16.9
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:cilium-v1.16.9
+  - name: sealos-pro-cilium
+    version: v1.13.18
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:cilium-v1.13.18
+  - name: sealos-pro-cert-manager
+    version: v1.19.1
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:cert-manager-v1.19.1
+  - name: sealos-pro-openebs
+    version: v3.10.0
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:openebs-v3.10.0
+  - name: sealos-pro-higress
+    version: v2.1.3
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:higress-v2.1.3
+  - name: sealos-pro-victoria-metrics-k8s-stack
+    version: v1.124.0
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:victoria-metrics-k8s-stack-v1.124.0
+  - name: sealos-pro-kubeblocks
+    version: v0.8.2
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:kubeblocks-v0.8.2
+  - name: sealos-pro-oss
+    version: v1
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:sealos-oss-v1
+  - name: sealos-pro-minio
+    version: v0.1.0
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:sealos-minio-v0.1.0
+  - name: sealos-pro-vlogs
+    version: v1.31.0
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:vlogs-v1.31.0
+  - name: sealos-pro-offline
+    version: v0.1.0
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:sealos-offline-v0.1.0
+  - name: sealos-pro-dnsmasq
+    version: v1
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:dnsmasq-v1
+  - name: sealos-pro-devbox
+    version: v1
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-pro:devbox-v1
+  - name: sealos-cloud-desktop-frontend
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-desktop-frontend:sha-568d00f70
+    sources:
+      - type: local
+        path: frontend/desktop/deploy
+        file: Kubefile
+  - name: sealos-cloud-user-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-user-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/user/deploy
+        file: Kubefile
+  - name: sealos-cloud-terminal-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-terminal-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/terminal/deploy
+        file: Kubefile
+  - name: sealos-cloud-app-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-app-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/app/deploy
+        file: Kubefile
+  - name: sealos-cloud-account-service
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-account-service:sha-568d00f70
+    sources:
+      - type: local
+        path: service/account/deploy
+        file: Kubefile
+  - name: sealos-cloud-job-init-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-job-init-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/job/init/deploy
+        file: Kubefile
+  - name: sealos-cloud-job-heartbeat-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-job-heartbeat-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/job/heartbeat/deploy
+        file: Kubefile
+  - name: sealos-cloud-license-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-license-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/license/deploy
+        file: Kubefile
+  - name: sealos-cloud-applaunchpad-frontend
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-applaunchpad-frontend:sha-568d00f70
+    sources:
+      - type: local
+        path: frontend/providers/applaunchpad/deploy
+        file: Kubefile
+  - name: sealos-cloud-terminal-frontend
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-terminal-frontend:sha-568d00f70
+    sources:
+      - type: local
+        path: frontend/providers/terminal/deploy
+        file: Kubefile
+  - name: sealos-cloud-dbprovider-frontend
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-dbprovider-frontend:sha-568d00f70
+    sources:
+      - type: local
+        path: frontend/providers/dbprovider/deploy
+        file: Kubefile
+  - name: sealos-cloud-costcenter-frontend
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-costcenter-frontend:sha-568d00f70
+    sources:
+      - type: local
+        path: frontend/providers/costcenter/deploy
+        file: Kubefile
+  - name: sealos-cloud-template-frontend
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-template-frontend:sha-568d00f70
+    sources:
+      - type: local
+        path: frontend/providers/template/deploy
+        file: Kubefile
+  - name: sealos-cloud-license-frontend
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-license-frontend:sha-568d00f70
+    sources:
+      - type: local
+        path: frontend/providers/license/deploy
+        file: Kubefile
+  - name: sealos-cloud-database-service
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-database-service:sha-568d00f70
+    sources:
+      - type: local
+        path: service/database/deploy
+        file: Kubefile
+  - name: sealos-cloud-launchpad-service
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-launchpad-service:sha-568d00f70
+    sources:
+      - type: local
+        path: service/launchpad/deploy
+        file: Kubefile
+  - name: sealos-cloud-account-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-account-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/account/deploy
+        file: Kubefile
+  - name: sealos-cloud-resources-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-resources-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/resources/deploy
+        file: Kubefile
+  - name: sealos-cloud-admission-webhook
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-admission-webhook:sha-568d00f70
+    sources:
+      - type: local
+        path: webhooks/admission/deploy
+        file: Kubefile
+  - name: sealos-cloud-node-controller
+    version: sha-568d00f70
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-node-controller:sha-568d00f70
+    sources:
+      - type: local
+        path: controllers/node/deploy
+        file: Kubefile
+  - name: sealos-cloud-vlogs-service
+    version: sha-ae2f7dc3d
+    remote:
+      image: sealos-pro.hub:19999/labring/sealos-cloud-vlogs-service:sha-ae2f7dc3d
+    sources:
+      - type: local
+        path: service/vlogs/deploy
+        file: Kubefile

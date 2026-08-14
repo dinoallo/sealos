@@ -25,6 +25,8 @@ existing SEALOS_V2_* variables and this wrapper will disable prompting.
 Examples:
   sealos distribution install
   sealos distribution install cloud@v5.1.0 --masters 192.0.2.10:22 --cloud-domain 192.0.2.10.nip.io
+  SEALOS_V2_PACKAGE_MODE=source SEALOS_V2_SOURCE_ROOT=/path/to/sealos \
+  ./install-v2.sh
   SEALOS_V2_MASTERS=192.0.2.10:22 \
   SEALOS_V2_CLOUD_DOMAIN=192.0.2.10.nip.io \
   ./install-v2.sh

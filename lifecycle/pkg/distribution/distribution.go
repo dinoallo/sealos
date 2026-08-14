@@ -37,10 +37,11 @@ var (
 var ErrNotFound = errors.New("distribution manifest not found")
 
 type Manifest struct {
-	Name        string   `json:"name" yaml:"name"`
-	Version     string   `json:"version" yaml:"version"`
-	Description string   `json:"description,omitempty" yaml:"description,omitempty"`
-	Images      []string `json:"images" yaml:"images"`
+	Name        string       `json:"name" yaml:"name"`
+	Version     string       `json:"version" yaml:"version"`
+	Description string       `json:"description,omitempty" yaml:"description,omitempty"`
+	Packages    []PackageRef `json:"packages,omitempty" yaml:"packages,omitempty"`
+	Images      []string     `json:"images,omitempty" yaml:"images,omitempty"`
 }
 
 type Summary struct {
@@ -59,12 +60,12 @@ func (m Manifest) Ref() string {
 func ParseRef(ref string) (string, string, error) {
 	parts := strings.Split(ref, "@")
 	if len(parts) != 2 {
-		return "", "", fmt.Errorf("distribution reference must be in the form name@version")
+		return "", "", fmt.Errorf("reference must be in the form name@version")
 	}
 	name := strings.TrimSpace(parts[0])
 	version := strings.TrimSpace(parts[1])
 	if name == "" || version == "" {
-		return "", "", fmt.Errorf("distribution reference must be in the form name@version")
+		return "", "", fmt.Errorf("reference must be in the form name@version")
 	}
 	return name, version, nil
 }
@@ -76,6 +77,9 @@ func List() ([]Summary, error) {
 			return err
 		}
 		if d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(filePath, dataRoot+"/packages/") {
 			return nil
 		}
 		if !isManifestFile(filePath) {
@@ -128,7 +132,15 @@ func Resolve(ref string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	return append([]string(nil), manifest.Images...), nil
+	resolved, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveRemote})
+	if err != nil {
+		return nil, err
+	}
+	images := make([]string, 0, len(resolved))
+	for _, item := range resolved {
+		images = append(images, item.Image)
+	}
+	return images, nil
 }
 
 func (m Manifest) Validate() error {
@@ -138,8 +150,24 @@ func (m Manifest) Validate() error {
 	if m.Version == "" {
 		return errors.New("distribution version is required")
 	}
-	if len(m.Images) == 0 {
-		return errors.New("distribution images are required")
+	if len(m.Packages) == 0 && len(m.Images) == 0 {
+		return errors.New("distribution packages are required")
+	}
+	if len(m.Packages) > 0 && len(m.Images) > 0 {
+		return errors.New("distribution cannot define both packages and images")
+	}
+	if len(m.Packages) > 0 {
+		seen := make(map[string]struct{}, len(m.Packages))
+		for i, ref := range m.Packages {
+			if strings.TrimSpace(ref.Name) == "" || strings.TrimSpace(ref.Version) == "" {
+				return fmt.Errorf("distribution package %d must include name and version", i)
+			}
+			if _, ok := seen[ref.Ref()]; ok {
+				return fmt.Errorf("duplicate distribution package %q", ref.Ref())
+			}
+			seen[ref.Ref()] = struct{}{}
+		}
+		return nil
 	}
 
 	seen := make(map[string]struct{}, len(m.Images))

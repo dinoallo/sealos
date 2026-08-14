@@ -30,10 +30,10 @@ func TestResolveImagesKeepsManifestOrder(t *testing.T) {
 
 	images, err := ResolveImages(manifest)
 	require.NoError(t, err)
-	require.Equal(t, manifest.Images[0], images.Kubernetes)
-	require.Equal(t, manifest.Images[10], images.Cloud)
-	require.Equal(t, manifest.Images[13], images.CloudDesktopFrontend)
-	require.Equal(t, manifest.Images[30], images.CloudLaunchpadService)
+	require.Equal(t, "ghcr.io/labring/sealos/kubernetes:v1.28.15", images.Kubernetes)
+	require.Equal(t, "ghcr.io/labring/sealos-cloud:v5.1.0", images.Cloud)
+	require.Equal(t, "ghcr.io/labring/sealos-cloud-desktop-frontend:v5.1.0", images.CloudDesktopFrontend)
+	require.Equal(t, "ghcr.io/labring/sealos-cloud-launchpad-service:v5.1.0", images.CloudLaunchpadService)
 }
 
 func TestResolveImagesRejectsTrackingOnlyManifest(t *testing.T) {
@@ -49,6 +49,10 @@ func TestConfigValidation(t *testing.T) {
 	cfg.Masters = "192.0.2.10:22"
 	cfg.CloudDomain = "cloud.example.com"
 	require.NoError(t, cfg.Validate())
+	cfg.SourceRoot = ""
+	require.NoError(t, cfg.Validate())
+	cfg.PackageMode = distribution.ResolveHybrid
+	require.NoError(t, cfg.Validate())
 
 	cfg.CloudDomain = ""
 	require.ErrorContains(t, cfg.Validate(), "cloud domain is required")
@@ -62,6 +66,9 @@ func TestConfigFromEnv(t *testing.T) {
 		"SEALOS_V2_MAX_POD":           "200",
 		"SEALOS_V2_ENABLE_ACME":       "true",
 		"SEALOS_V2_REGISTRY_PASSWORD": "secret",
+		"SEALOS_V2_PACKAGE_MODE":      "source",
+		"SEALOS_V2_SOURCE_ROOT":       "/workspace/sealos",
+		"SEALOS_V2_SOURCE_CACHE":      "/workspace/cache",
 	}
 	cfg := ConfigFromEnv(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -72,6 +79,9 @@ func TestConfigFromEnv(t *testing.T) {
 	require.Equal(t, 200, cfg.MaxPods)
 	require.True(t, cfg.EnableACME)
 	require.Equal(t, "secret", cfg.RegistryPass)
+	require.Equal(t, distribution.ResolveSource, cfg.PackageMode)
+	require.Equal(t, "/workspace/sealos", cfg.SourceRoot)
+	require.Equal(t, "/workspace/cache", cfg.SourceCache)
 }
 
 func TestCommandRedactsSecrets(t *testing.T) {
@@ -79,12 +89,14 @@ func TestCommandRedactsSecrets(t *testing.T) {
 		"login", "-u", "admin", "-p", "secret-password", "sealos.hub:5000", "--pk-passwd", "key-secret",
 		"--env", "PASSWORD_SALT=another-secret",
 		"--env", "databaseMongodbURI=mongodb://user:password@example.com",
+		"--build-arg", "REGISTRY_TOKEN=build-secret",
 	}}
 	redacted := command.RedactedString()
 	require.NotContains(t, redacted, "secret-password")
 	require.NotContains(t, redacted, "key-secret")
 	require.NotContains(t, redacted, "another-secret")
 	require.NotContains(t, redacted, "mongodb://user:password@example.com")
+	require.NotContains(t, redacted, "build-secret")
 	require.Contains(t, redacted, "<redacted>")
 	require.Equal(t, "sealos run image:v1 --env certSecretName=wildcard-cert", (Command{Name: "sealos", Args: []string{"run", "image:v1", "--env", "certSecretName=wildcard-cert"}}).RedactedString())
 }
