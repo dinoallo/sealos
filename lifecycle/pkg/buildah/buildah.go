@@ -124,6 +124,7 @@ func markFlagsHidden(fs *pflag.FlagSet, names ...string) error {
 func AllImageSubCommands() []*cobra.Command {
 	cmds := []*cobra.Command{
 		newBuildCommand(),
+		newBuildCacheCommand(),
 		newCreateCmd(),
 		newDiffCommand(),
 		newInspectCommand(),
