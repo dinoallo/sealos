@@ -61,6 +61,19 @@ $ sealos run labring/clickhouse:0.18.4
 $ sealos run labring/redis-operator:3.1.4
 ```
 
+## Installing Sealos Cloud from a Distribution
+
+Versioned Sealos Cloud installations are tracked by distribution manifests. The native CLI lists the available
+manifests and interactively asks for the cluster and access settings that are specific to the target environment:
+
+```shell
+sealos distribution list
+sealos distribution install cloud@v5.1.0
+```
+
+Use `--interactive=false` with `--masters` and `--cloud-domain` for automation. The legacy
+`scripts/cloud/install-v2.sh` entrypoint remains as a compatibility wrapper and forwards to this command.
+
 ## Customizing the Cluster
 
 For cluster images not available in the Sealos ecosystem, users can easily build and customize their own cluster images.

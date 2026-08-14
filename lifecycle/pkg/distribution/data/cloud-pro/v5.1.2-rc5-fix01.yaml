@@ -1,0 +1,39 @@
+name: cloud-pro
+version: v5.1.2-rc5-fix01
+description: Sealos Pro v5.1.2-rc5 fix01 distribution captured from the bundled local registry.
+images:
+  - sealos-pro.hub:19999/labring/sealos-pro:kubernetes-v1.28.15
+  - sealos-pro.hub:19999/labring/sealos-pro:cilium-v1.16.9
+  - sealos-pro.hub:19999/labring/sealos-pro:cilium-v1.13.18
+  - sealos-pro.hub:19999/labring/sealos-pro:cert-manager-v1.19.1
+  - sealos-pro.hub:19999/labring/sealos-pro:openebs-v3.10.0
+  - sealos-pro.hub:19999/labring/sealos-pro:higress-v2.1.3
+  - sealos-pro.hub:19999/labring/sealos-pro:victoria-metrics-k8s-stack-v1.124.0
+  - sealos-pro.hub:19999/labring/sealos-pro:kubeblocks-v0.8.2
+  - sealos-pro.hub:19999/labring/sealos-pro:sealos-oss-v1
+  - sealos-pro.hub:19999/labring/sealos-pro:sealos-minio-v0.1.0
+  - sealos-pro.hub:19999/labring/sealos-pro:vlogs-v1.31.0
+  - sealos-pro.hub:19999/labring/sealos-pro:sealos-offline-v0.1.0
+  - sealos-pro.hub:19999/labring/sealos-pro:dnsmasq-v1
+  - sealos-pro.hub:19999/labring/sealos-pro:devbox-v1
+  - sealos-pro.hub:19999/labring/sealos-cloud-desktop-frontend:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-user-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-terminal-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-app-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-account-service:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-job-init-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-job-heartbeat-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-license-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-applaunchpad-frontend:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-terminal-frontend:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-dbprovider-frontend:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-costcenter-frontend:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-template-frontend:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-license-frontend:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-database-service:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-launchpad-service:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-account-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-resources-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-admission-webhook:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-node-controller:sha-568d00f70
+  - sealos-pro.hub:19999/labring/sealos-cloud-vlogs-service:sha-ae2f7dc3d
