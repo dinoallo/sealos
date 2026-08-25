@@ -41,6 +41,11 @@ func TestParseAdminNotificationRecipientsReq(t *testing.T) {
 			body:    `{"namespaces":[" "]}`,
 			wantErr: true,
 		},
+		{
+			name:    "rejects invalid kubernetes namespace",
+			body:    `{"namespaces":["ns_a"]}`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {

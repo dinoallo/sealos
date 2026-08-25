@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"k8s.io/apimachinery/pkg/api/validation"
 )
 
 const (
@@ -32,6 +33,9 @@ func ParseAdminNotificationRecipientsReq(c *gin.Context) (*AdminNotificationReci
 		namespace = strings.TrimSpace(namespace)
 		if namespace == "" {
 			return nil, fmt.Errorf("namespaces must not contain empty values")
+		}
+		if errs := validation.ValidateNamespaceName(namespace, false); len(errs) > 0 {
+			return nil, fmt.Errorf("invalid namespace %q: %s", namespace, strings.Join(errs, "; "))
 		}
 		if _, ok := seenNamespaces[namespace]; ok {
 			continue
