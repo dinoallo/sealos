@@ -131,32 +131,32 @@ func buildAdminNotificationRecipients(
 		addAdminNotificationContact(&sources.NotificationContacts, method, account.ProviderID)
 	}
 
-	rowByNamespace := make(map[string]adminNotificationNamespaceRow, len(rows))
+	ownerUIDsByNamespace := make(map[string][]uuid.UUID, len(rows))
 	for _, row := range rows {
-		rowByNamespace[row.Namespace] = row
+		ownerUIDsByNamespace[row.Namespace] = append(ownerUIDsByNamespace[row.Namespace], row.UserUID)
 	}
 	result := helper.AdminNotificationRecipientsResp{
-		Recipients:             make([]helper.AdminNotificationRecipient, 0),
-		Users:                  make([]helper.AdminNotificationUser, 0, len(namespaces)),
-		UnresolvedNamespaces:   make([]string, 0),
-		UsersWithoutRecipients: make([]string, 0),
+		Recipients:                  make([]helper.AdminNotificationRecipient, 0),
+		Users:                       make([]helper.AdminNotificationUser, 0, len(namespaces)),
+		UnresolvedNamespaces:        make([]string, 0),
+		NamespacesWithoutRecipients: make([]string, 0),
 	}
 	seenRecipients := make(map[string]struct{})
 
 	for _, namespace := range namespaces {
-		row, ok := rowByNamespace[namespace]
-		if !ok || row.UserUID == uuid.Nil {
+		userUID, ok := resolveAdminNotificationNamespaceOwner(ownerUIDsByNamespace[namespace])
+		if !ok {
 			result.UnresolvedNamespaces = append(result.UnresolvedNamespaces, namespace)
 			continue
 		}
 
-		sources := contactsByUser[row.UserUID]
+		sources := contactsByUser[userUID]
 		if sources == nil {
 			sources = &adminNotificationContactSources{}
 		}
 		user := helper.AdminNotificationUser{
 			Namespace:            namespace,
-			UserUID:              row.UserUID,
+			UserUID:              userUID,
 			OauthProviders:       sources.OauthProviders,
 			NotificationContacts: sources.NotificationContacts,
 		}
@@ -175,11 +175,31 @@ func buildAdminNotificationRecipients(
 			result.Recipients = append(result.Recipients, contact)
 		}
 		if userRecipientCount == 0 {
-			result.UsersWithoutRecipients = append(result.UsersWithoutRecipients, namespace)
+			result.NamespacesWithoutRecipients = append(result.NamespacesWithoutRecipients, namespace)
 		}
 	}
 
 	return result
+}
+
+func resolveAdminNotificationNamespaceOwner(userUIDs []uuid.UUID) (uuid.UUID, bool) {
+	var ownerUID uuid.UUID
+	for _, userUID := range userUIDs {
+		if userUID == uuid.Nil {
+			return uuid.Nil, false
+		}
+		if ownerUID == uuid.Nil {
+			ownerUID = userUID
+			continue
+		}
+		if ownerUID != userUID {
+			return uuid.Nil, false
+		}
+	}
+	if ownerUID == uuid.Nil {
+		return uuid.Nil, false
+	}
+	return ownerUID, true
 }
 
 func notificationMethod(providerType types.OauthProviderType) string {

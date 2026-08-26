@@ -1709,7 +1709,7 @@ const docTemplate = `{
                         "$ref": "#/definitions/helper.AdminNotificationUser"
                     }
                 },
-                "usersWithoutRecipients": {
+                "namespacesWithoutRecipients": {
                     "type": "array",
                     "items": {
                         "type": "string"

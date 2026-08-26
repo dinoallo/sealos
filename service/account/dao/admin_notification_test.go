@@ -37,8 +37,8 @@ func TestBuildAdminNotificationRecipients(t *testing.T) {
 	if len(result.Users) != 2 {
 		t.Fatalf("users = %d, want 2", len(result.Users))
 	}
-	if len(result.UsersWithoutRecipients) != 0 {
-		t.Fatalf("users without recipients = %v, want empty", result.UsersWithoutRecipients)
+	if len(result.NamespacesWithoutRecipients) != 0 {
+		t.Fatalf("namespaces without recipients = %v, want empty", result.NamespacesWithoutRecipients)
 	}
 
 	user := result.Users[0]
@@ -80,7 +80,37 @@ func TestBuildAdminNotificationRecipientsWithoutContacts(t *testing.T) {
 	if len(result.Recipients) != 0 {
 		t.Fatalf("recipients = %+v, want empty", result.Recipients)
 	}
-	if len(result.UsersWithoutRecipients) != 1 || result.UsersWithoutRecipients[0] != "ns-empty" {
-		t.Fatalf("users without recipients = %v, want [ns-empty]", result.UsersWithoutRecipients)
+	if len(result.NamespacesWithoutRecipients) != 1 || result.NamespacesWithoutRecipients[0] != "ns-empty" {
+		t.Fatalf("namespaces without recipients = %v, want [ns-empty]", result.NamespacesWithoutRecipients)
+	}
+}
+
+func TestBuildAdminNotificationRecipientsWithAmbiguousOwner(t *testing.T) {
+	ownerA := uuid.New()
+	ownerB := uuid.New()
+	result := buildAdminNotificationRecipients(
+		[]string{"ns-ambiguous", "ns-duplicate"},
+		[]adminNotificationNamespaceRow{
+			{Namespace: "ns-ambiguous", UserUID: ownerA},
+			{Namespace: "ns-ambiguous", UserUID: ownerB},
+			{Namespace: "ns-duplicate", UserUID: ownerA},
+			{Namespace: "ns-duplicate", UserUID: ownerA},
+		},
+		[]types.OauthProvider{
+			{UserUID: ownerA, ProviderType: types.OauthProviderTypeEmail, ProviderID: "owner@example.com"},
+			{UserUID: ownerB, ProviderType: types.OauthProviderTypeEmail, ProviderID: "other@example.com"},
+		},
+		nil,
+		[]string{helper.NotificationMethodEmail},
+	)
+
+	if len(result.UnresolvedNamespaces) != 1 || result.UnresolvedNamespaces[0] != "ns-ambiguous" {
+		t.Fatalf("unresolved namespaces = %v, want [ns-ambiguous]", result.UnresolvedNamespaces)
+	}
+	if len(result.Users) != 1 || result.Users[0].Namespace != "ns-duplicate" || result.Users[0].UserUID != ownerA {
+		t.Fatalf("users = %+v, want one user for ns-duplicate owned by ownerA", result.Users)
+	}
+	if len(result.Recipients) != 1 || result.Recipients[0].Value != "owner@example.com" {
+		t.Fatalf("recipients = %+v, want only owner@example.com", result.Recipients)
 	}
 }

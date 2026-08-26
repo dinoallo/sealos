@@ -44,7 +44,7 @@ definitions:
         items:
           $ref: '#/definitions/helper.AdminNotificationUser'
         type: array
-      usersWithoutRecipients:
+      namespacesWithoutRecipients:
         items:
           type: string
         type: array

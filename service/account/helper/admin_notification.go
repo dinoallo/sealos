@@ -91,8 +91,8 @@ type AdminNotificationUser struct {
 }
 
 type AdminNotificationRecipientsResp struct {
-	Recipients             []AdminNotificationRecipient `json:"recipients"`
-	Users                  []AdminNotificationUser      `json:"users"`
-	UnresolvedNamespaces   []string                     `json:"unresolvedNamespaces"`
-	UsersWithoutRecipients []string                     `json:"usersWithoutRecipients"`
+	Recipients                  []AdminNotificationRecipient `json:"recipients"`
+	Users                       []AdminNotificationUser      `json:"users"`
+	UnresolvedNamespaces        []string                     `json:"unresolvedNamespaces"`
+	NamespacesWithoutRecipients []string                     `json:"namespacesWithoutRecipients"`
 }
