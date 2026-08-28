@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/labring/sealos/controllers/pkg/types"
@@ -20,7 +21,7 @@ func isWorkspaceSubscriptionNamespaceRecoverable(
 	workspace string,
 ) (bool, error) {
 	if clt == nil {
-		return false, fmt.Errorf("kubernetes client is not initialized")
+		return false, errors.New("kubernetes client is not initialized")
 	}
 
 	ns := &corev1.Namespace{}

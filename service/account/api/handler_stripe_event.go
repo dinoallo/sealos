@@ -769,7 +769,9 @@ func rejectDeletedWorkspaceSubscriptionPayment(
 		}
 	}
 
-	if _, err := services.StripeServiceInstance.CancelSubscription(stripeSubscriptionID); err != nil {
+	if _, err := services.StripeServiceInstance.CancelSubscription(
+		stripeSubscriptionID,
+	); err != nil {
 		return fmt.Errorf("failed to cancel invalid subscription %s: %w", stripeSubscriptionID, err)
 	}
 	dao.Logger.Infof(

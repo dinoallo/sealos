@@ -1175,6 +1175,98 @@ func parseWorkspaceSubscriptionPayReq(
 	return req, nil
 }
 
+func validateDeletedWorkspaceSubscriptionPayment(
+	c *gin.Context,
+	req *helper.WorkspaceSubscriptionOperatorReq,
+	currentSubscription *types.WorkspaceSubscription,
+) bool {
+	if currentSubscription == nil || currentSubscription.Status != types.SubscriptionStatusDeleted {
+		return true
+	}
+	if req.Operator != types.SubscriptionTransactionTypeCreated {
+		SetErrorResp(
+			c,
+			http.StatusBadRequest,
+			gin.H{
+				"error": "deleted workspace subscription can only be recreated with a new subscription",
+			},
+		)
+		return false
+	}
+	if req.PayMethod != helper.STRIPE {
+		SetErrorResp(
+			c,
+			http.StatusBadRequest,
+			gin.H{"error": "deleted workspace subscription must be recreated with Stripe payment"},
+		)
+		return false
+	}
+	if dao.K8sManager == nil {
+		SetErrorResp(
+			c,
+			http.StatusInternalServerError,
+			gin.H{"error": "kubernetes manager is not initialized"},
+		)
+		return false
+	}
+	recoverable, err := isWorkspaceSubscriptionNamespaceRecoverable(
+		c.Request.Context(),
+		dao.K8sManager.GetClient(),
+		req.Workspace,
+	)
+	if err != nil {
+		SetErrorResp(
+			c,
+			http.StatusInternalServerError,
+			gin.H{"error": fmt.Sprintf("failed to validate workspace namespace: %v", err)},
+		)
+		return false
+	}
+	if !recoverable {
+		SetErrorResp(
+			c,
+			http.StatusBadRequest,
+			gin.H{"error": "workspace namespace is no longer recoverable"},
+		)
+		return false
+	}
+	return true
+}
+
+func validateWorkspaceSubscriptionCreation(
+	c *gin.Context,
+	req *helper.WorkspaceSubscriptionOperatorReq,
+	currentSubscription *types.WorkspaceSubscription,
+) bool {
+	if currentSubscription == nil ||
+		currentSubscription.PlanName == types.FreeSubscriptionPlanName {
+		return true
+	}
+	if currentSubscription.Status != types.SubscriptionStatusDebt &&
+		currentSubscription.Status != types.SubscriptionStatusDeleted {
+		SetErrorResp(
+			c,
+			http.StatusBadRequest,
+			gin.H{"error": "cannot create new subscription with existing active subscription"},
+		)
+		return false
+	}
+	if currentSubscription.Status == types.SubscriptionStatusDebt {
+		logrus.Infof(
+			"Allowing subscription creation for overdue workspace %s/%s, will cancel old subscription",
+			req.Workspace,
+			req.RegionDomain,
+		)
+	} else {
+		logrus.Infof(
+			"Allowing subscription recreation for recoverable deleted workspace %s/%s",
+			req.Workspace,
+			req.RegionDomain,
+		)
+	}
+	return true
+}
+
 func CreateWorkspaceSubscriptionPay(c *gin.Context) {
 	req, err := parseWorkspaceSubscriptionPayReq(c)
 	if err != nil {
@@ -1211,55 +1303,8 @@ func CreateWorkspaceSubscriptionPay(c *gin.Context) {
 		return
 	}
 
-	if currentSubscription != nil &&
-		currentSubscription.Status == types.SubscriptionStatusDeleted &&
-		req.Operator != types.SubscriptionTransactionTypeCreated {
-		SetErrorResp(
-			c,
-			http.StatusBadRequest,
-			gin.H{"error": "deleted workspace subscription can only be recreated with a new subscription"},
-		)
+	if !validateDeletedWorkspaceSubscriptionPayment(c, req, currentSubscription) {
 		return
-	}
-
-	if currentSubscription != nil && currentSubscription.Status == types.SubscriptionStatusDeleted {
-		if req.PayMethod != helper.STRIPE {
-			SetErrorResp(
-				c,
-				http.StatusBadRequest,
-				gin.H{"error": "deleted workspace subscription must be recreated with Stripe payment"},
-			)
-			return
-		}
-		if dao.K8sManager == nil {
-			SetErrorResp(
-				c,
-				http.StatusInternalServerError,
-				gin.H{"error": "kubernetes manager is not initialized"},
-			)
-			return
-		}
-		recoverable, err := isWorkspaceSubscriptionNamespaceRecoverable(
-			c.Request.Context(),
-			dao.K8sManager.GetClient(),
-			req.Workspace,
-		)
-		if err != nil {
-			SetErrorResp(
-				c,
-				http.StatusInternalServerError,
-				gin.H{"error": fmt.Sprintf("failed to validate workspace namespace: %v", err)},
-			)
-			return
-		}
-		if !recoverable {
-			SetErrorResp(
-				c,
-				http.StatusBadRequest,
-				gin.H{"error": "workspace namespace is no longer recoverable"},
-			)
-			return
-		}
 	}
 
 	// Validate plan changes
@@ -1352,36 +1397,8 @@ func CreateWorkspaceSubscriptionPay(c *gin.Context) {
 	// Validate plan transitions and calculate pricing based on operator
 	switch req.Operator {
 	case types.SubscriptionTransactionTypeCreated:
-		// No additional validation needed for creation
-		if currentSubscription != nil &&
-			currentSubscription.PlanName != types.FreeSubscriptionPlanName {
-			// Allow re-creation for overdue subscriptions
-			switch currentSubscription.Status {
-			case types.SubscriptionStatusDebt:
-				// Overdue status allowed, will cancel old subscription in payment flow
-				logrus.Infof(
-					"Allowing subscription creation for overdue workspace %s/%s, will cancel old subscription",
-					req.Workspace,
-					req.RegionDomain,
-				)
-			case types.SubscriptionStatusDeleted:
-				// Recoverable deleted subscriptions are recreated with a new Stripe subscription.
-				logrus.Infof(
-					"Allowing subscription recreation for recoverable deleted workspace %s/%s",
-					req.Workspace,
-					req.RegionDomain,
-				)
-			default:
-				// Normal active subscription, reject creation
-				SetErrorResp(
-					c,
-					http.StatusBadRequest,
-					gin.H{
-						"error": "cannot create new subscription with existing active subscription",
-					},
-				)
-				return
-			}
+		if !validateWorkspaceSubscriptionCreation(c, req, currentSubscription) {
+			return
 		}
 		transaction.Amount = planPrice.Price // Full price for new subscription
 	case types.SubscriptionTransactionTypeUpgraded:
@@ -3044,7 +3061,9 @@ func updateWorkspaceSubscriptionNamespaceStatus(workspace string) error {
 		ns.Annotations[types.WorkspaceSubscriptionStatusAnnoKey] = types.NormalDebtNamespaceAnnoStatus
 		ns.Annotations[DebtNamespaceAnnoStatusKey] = ResumeDebtNamespaceAnnoStatus
 		ns.Annotations[NetworkStatusAnnoKey] = ResumeDebtNamespaceAnnoStatus
-		ns.Annotations[types.WorkspaceSubscriptionStatusUpdateTimeAnnoKey] = time.Now().UTC().Format(time.RFC3339)
+		ns.Annotations[types.WorkspaceSubscriptionStatusUpdateTimeAnnoKey] = time.Now().
+			UTC().
+			Format(time.RFC3339)
 		if err := dao.K8sManager.GetClient().
 			Patch(ctx, ns, client.MergeFrom(original)); err != nil {
 			return fmt.Errorf("patch namespace annotation failed: %w", err)
@@ -3598,7 +3617,9 @@ func handleDeletedWorkspaceSubscriptionInitialPaymentFailure(
 			First(&wsTransaction).
 			Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
-				_, cancelErr := services.StripeServiceInstance.CancelSubscription(stripeSubscription.ID)
+				_, cancelErr := services.StripeServiceInstance.CancelSubscription(
+					stripeSubscription.ID,
+				)
 				return cancelErr
 			}
 			return fmt.Errorf("failed to get deleted workspace resubscription transaction: %w", err)
@@ -3613,7 +3634,7 @@ func handleDeletedWorkspaceSubscriptionInitialPaymentFailure(
 			return err
 		}
 
-		failureReason := fmt.Sprintf("Stripe payment failed for invoice %s", invoice.ID)
+		failureReason := "Stripe payment failed for invoice " + invoice.ID
 		if invoice.LastFinalizationError != nil {
 			failureReason = invoice.LastFinalizationError.Error()
 		}
@@ -3621,18 +3642,30 @@ func handleDeletedWorkspaceSubscriptionInitialPaymentFailure(
 		wsTransaction.PayStatus = types.SubscriptionPayStatusFailed
 		wsTransaction.StatusDesc = failureReason
 		if err := tx.Save(&wsTransaction).Error; err != nil {
-			return fmt.Errorf("failed to update deleted workspace resubscription transaction: %w", err)
+			return fmt.Errorf(
+				"failed to update deleted workspace resubscription transaction: %w",
+				err,
+			)
 		}
 
 		if err := tx.Model(&types.PaymentOrder{}).
 			Where("id = ?", metadata.paymentID).
 			Update("status", types.PaymentOrderStatusFailed).
 			Error; err != nil {
-			return fmt.Errorf("failed to update deleted workspace resubscription payment order: %w", err)
+			return fmt.Errorf(
+				"failed to update deleted workspace resubscription payment order: %w",
+				err,
+			)
 		}
 
-		if _, err := services.StripeServiceInstance.CancelSubscription(stripeSubscription.ID); err != nil {
-			return fmt.Errorf("failed to cancel failed resubscription %s: %w", stripeSubscription.ID, err)
+		if _, err := services.StripeServiceInstance.CancelSubscription(
+			stripeSubscription.ID,
+		); err != nil {
+			return fmt.Errorf(
+				"failed to cancel failed resubscription %s: %w",
+				stripeSubscription.ID,
+				err,
+			)
 		}
 		return nil
 	})
