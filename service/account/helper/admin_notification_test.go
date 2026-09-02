@@ -61,13 +61,23 @@ func TestParseAdminNotificationRecipientsReq(t *testing.T) {
 
 			got, err := ParseAdminNotificationRecipientsReq(c)
 			if (err != nil) != tt.wantErr {
-				t.Fatalf("ParseAdminNotificationRecipientsReq() error = %v, wantErr %v", err, tt.wantErr)
+				t.Fatalf(
+					"ParseAdminNotificationRecipientsReq() error = %v, wantErr %v",
+					err,
+					tt.wantErr,
+				)
 			}
 			if tt.wantErr {
 				return
 			}
-			if len(got.Namespaces) != len(tt.ns) || len(got.NotificationMethods) != len(tt.methods) {
-				t.Fatalf("parsed request = %+v, want namespaces %v and methods %v", got, tt.ns, tt.methods)
+			if len(got.Namespaces) != len(tt.ns) ||
+				len(got.NotificationMethods) != len(tt.methods) {
+				t.Fatalf(
+					"parsed request = %+v, want namespaces %v and methods %v",
+					got,
+					tt.ns,
+					tt.methods,
+				)
 			}
 			for i := range tt.ns {
 				if got.Namespaces[i] != tt.ns[i] {
@@ -76,7 +86,12 @@ func TestParseAdminNotificationRecipientsReq(t *testing.T) {
 			}
 			for i := range tt.methods {
 				if got.NotificationMethods[i] != tt.methods[i] {
-					t.Fatalf("method[%d] = %q, want %q", i, got.NotificationMethods[i], tt.methods[i])
+					t.Fatalf(
+						"method[%d] = %q, want %q",
+						i,
+						got.NotificationMethods[i],
+						tt.methods[i],
+					)
 				}
 			}
 		})

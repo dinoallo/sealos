@@ -18,15 +18,43 @@ func TestBuildAdminNotificationRecipients(t *testing.T) {
 			{Namespace: "ns-b", UserUID: userB},
 		},
 		[]types.OauthProvider{
-			{UserUID: userA, ProviderType: types.OauthProviderTypeEmail, ProviderID: " OAuth@Example.com "},
+			{
+				UserUID:      userA,
+				ProviderType: types.OauthProviderTypeEmail,
+				ProviderID:   " OAuth@Example.com ",
+			},
 			{UserUID: userA, ProviderType: types.OauthProviderTypePhone, ProviderID: "+1-555-0001"},
-			{UserUID: userB, ProviderType: types.OauthProviderTypeEmail, ProviderID: "oauth@example.com"},
+			{
+				UserUID:      userB,
+				ProviderType: types.OauthProviderTypeEmail,
+				ProviderID:   "oauth@example.com",
+			},
 		},
 		[]types.UserAlertNotificationAccount{
-			{UserUID: userA, ProviderType: types.OauthProviderTypeEmail, ProviderID: "oauth@example.com", IsEnabled: true},
-			{UserUID: userA, ProviderType: types.OauthProviderTypeEmail, ProviderID: "notify@example.com", IsEnabled: true},
-			{UserUID: userA, ProviderType: types.OauthProviderTypePhone, ProviderID: "+1-555-0002", IsEnabled: true},
-			{UserUID: userA, ProviderType: types.OauthProviderTypeEmail, ProviderID: "disabled@example.com", IsEnabled: false},
+			{
+				UserUID:      userA,
+				ProviderType: types.OauthProviderTypeEmail,
+				ProviderID:   "oauth@example.com",
+				IsEnabled:    true,
+			},
+			{
+				UserUID:      userA,
+				ProviderType: types.OauthProviderTypeEmail,
+				ProviderID:   "notify@example.com",
+				IsEnabled:    true,
+			},
+			{
+				UserUID:      userA,
+				ProviderType: types.OauthProviderTypePhone,
+				ProviderID:   "+1-555-0002",
+				IsEnabled:    true,
+			},
+			{
+				UserUID:      userA,
+				ProviderType: types.OauthProviderTypeEmail,
+				ProviderID:   "disabled@example.com",
+				IsEnabled:    false,
+			},
 		},
 		[]string{helper.NotificationMethodEmail, helper.NotificationMethodPhone},
 	)
@@ -38,7 +66,10 @@ func TestBuildAdminNotificationRecipients(t *testing.T) {
 		t.Fatalf("users = %d, want 2", len(result.Users))
 	}
 	if len(result.NamespacesWithoutRecipients) != 0 {
-		t.Fatalf("namespaces without recipients = %v, want empty", result.NamespacesWithoutRecipients)
+		t.Fatalf(
+			"namespaces without recipients = %v, want empty",
+			result.NamespacesWithoutRecipients,
+		)
 	}
 
 	user := result.Users[0]
@@ -80,8 +111,12 @@ func TestBuildAdminNotificationRecipientsWithoutContacts(t *testing.T) {
 	if len(result.Recipients) != 0 {
 		t.Fatalf("recipients = %+v, want empty", result.Recipients)
 	}
-	if len(result.NamespacesWithoutRecipients) != 1 || result.NamespacesWithoutRecipients[0] != "ns-empty" {
-		t.Fatalf("namespaces without recipients = %v, want [ns-empty]", result.NamespacesWithoutRecipients)
+	if len(result.NamespacesWithoutRecipients) != 1 ||
+		result.NamespacesWithoutRecipients[0] != "ns-empty" {
+		t.Fatalf(
+			"namespaces without recipients = %v, want [ns-empty]",
+			result.NamespacesWithoutRecipients,
+		)
 	}
 }
 
@@ -97,8 +132,16 @@ func TestBuildAdminNotificationRecipientsWithAmbiguousOwner(t *testing.T) {
 			{Namespace: "ns-duplicate", UserUID: ownerA},
 		},
 		[]types.OauthProvider{
-			{UserUID: ownerA, ProviderType: types.OauthProviderTypeEmail, ProviderID: "owner@example.com"},
-			{UserUID: ownerB, ProviderType: types.OauthProviderTypeEmail, ProviderID: "other@example.com"},
+			{
+				UserUID:      ownerA,
+				ProviderType: types.OauthProviderTypeEmail,
+				ProviderID:   "owner@example.com",
+			},
+			{
+				UserUID:      ownerB,
+				ProviderType: types.OauthProviderTypeEmail,
+				ProviderID:   "other@example.com",
+			},
 		},
 		nil,
 		[]string{helper.NotificationMethodEmail},
@@ -107,7 +150,8 @@ func TestBuildAdminNotificationRecipientsWithAmbiguousOwner(t *testing.T) {
 	if len(result.UnresolvedNamespaces) != 1 || result.UnresolvedNamespaces[0] != "ns-ambiguous" {
 		t.Fatalf("unresolved namespaces = %v, want [ns-ambiguous]", result.UnresolvedNamespaces)
 	}
-	if len(result.Users) != 1 || result.Users[0].Namespace != "ns-duplicate" || result.Users[0].UserUID != ownerA {
+	if len(result.Users) != 1 || result.Users[0].Namespace != "ns-duplicate" ||
+		result.Users[0].UserUID != ownerA {
 		t.Fatalf("users = %+v, want one user for ns-duplicate owned by ownerA", result.Users)
 	}
 	if len(result.Recipients) != 1 || result.Recipients[0].Value != "owner@example.com" {

@@ -3,6 +3,7 @@ package dao
 import (
 	"fmt"
 	"net/mail"
+	"slices"
 	"sort"
 	"strings"
 
@@ -133,7 +134,10 @@ func buildAdminNotificationRecipients(
 
 	ownerUIDsByNamespace := make(map[string][]uuid.UUID, len(rows))
 	for _, row := range rows {
-		ownerUIDsByNamespace[row.Namespace] = append(ownerUIDsByNamespace[row.Namespace], row.UserUID)
+		ownerUIDsByNamespace[row.Namespace] = append(
+			ownerUIDsByNamespace[row.Namespace],
+			row.UserUID,
+		)
 	}
 	result := helper.AdminNotificationRecipientsResp{
 		Recipients:                  make([]helper.AdminNotificationRecipient, 0),
@@ -175,7 +179,10 @@ func buildAdminNotificationRecipients(
 			result.Recipients = append(result.Recipients, contact)
 		}
 		if userRecipientCount == 0 {
-			result.NamespacesWithoutRecipients = append(result.NamespacesWithoutRecipients, namespace)
+			result.NamespacesWithoutRecipients = append(
+				result.NamespacesWithoutRecipients,
+				namespace,
+			)
 		}
 	}
 
@@ -277,17 +284,15 @@ func adminNotificationContactsForMethods(
 				continue
 			}
 			seen[value] = struct{}{}
-			contacts = append(contacts, helper.AdminNotificationRecipient{Type: method, Value: value})
+			contacts = append(
+				contacts,
+				helper.AdminNotificationRecipient{Type: method, Value: value},
+			)
 		}
 	}
 	return contacts
 }
 
 func containsString(values []string, value string) bool {
-	for _, item := range values {
-		if item == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, value)
 }

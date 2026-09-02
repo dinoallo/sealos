@@ -1,6 +1,7 @@
 package helper
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -17,7 +18,7 @@ const (
 // AdminNotificationRecipientsReq requests notification contacts for workspace owners.
 // notificationMethods defaults to email when omitted.
 type AdminNotificationRecipientsReq struct {
-	Namespaces          []string `json:"namespaces" binding:"required"`
+	Namespaces          []string `json:"namespaces"          binding:"required"`
 	NotificationMethods []string `json:"notificationMethods"`
 }
 
@@ -32,7 +33,7 @@ func ParseAdminNotificationRecipientsReq(c *gin.Context) (*AdminNotificationReci
 	for _, namespace := range req.Namespaces {
 		namespace = strings.TrimSpace(namespace)
 		if namespace == "" {
-			return nil, fmt.Errorf("namespaces must not contain empty values")
+			return nil, errors.New("namespaces must not contain empty values")
 		}
 		if errs := validation.ValidateNamespaceName(namespace, false); len(errs) > 0 {
 			return nil, fmt.Errorf("invalid namespace %q: %s", namespace, strings.Join(errs, "; "))
@@ -44,10 +45,10 @@ func ParseAdminNotificationRecipientsReq(c *gin.Context) (*AdminNotificationReci
 		namespaces = append(namespaces, namespace)
 	}
 	if len(namespaces) == 0 {
-		return nil, fmt.Errorf("namespaces must contain at least one value")
+		return nil, errors.New("namespaces must contain at least one value")
 	}
 	if len(namespaces) > 1000 {
-		return nil, fmt.Errorf("namespaces must contain at most 1000 values")
+		return nil, errors.New("namespaces must contain at most 1000 values")
 	}
 
 	methods := req.NotificationMethods
