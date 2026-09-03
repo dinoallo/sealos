@@ -15,12 +15,14 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/manifoldco/promptui"
 	"github.com/spf13/cobra"
@@ -39,6 +41,10 @@ func newDistributionCmd() *cobra.Command {
 	cmd.AddCommand(newDistributionResolveCmd())
 	cmd.AddCommand(newDistributionValidateCmd())
 	cmd.AddCommand(newDistributionInstallCmd())
+	cmd.AddCommand(newDistributionDiffCmd())
+	cmd.AddCommand(newDistributionUpdateCmd())
+	cmd.AddCommand(newDistributionAdoptCmd())
+	cmd.AddCommand(newDistributionStatusCmd())
 	return cmd
 }
 
@@ -86,22 +92,13 @@ func newDistributionInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			runner, err := cloudinstall.NewCommandRunner(cmd.OutOrStdout(), cmd.ErrOrStderr())
+			installer, log, err := newDistributionInstaller(cmd, cfg)
 			if err != nil {
 				return err
 			}
-			var log io.WriteCloser
-			if !cfg.DryRun {
-				if err := os.MkdirAll(cfg.ConfigDir, 0o700); err != nil {
-					return fmt.Errorf("create installer config directory: %w", err)
-				}
-				log, err = os.OpenFile(filepath.Join(cfg.ConfigDir, "install.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
-				if err != nil {
-					return fmt.Errorf("open installer log: %w", err)
-				}
+			if log != nil {
 				defer log.Close()
 			}
-			installer := &cloudinstall.Installer{Config: cfg, Runner: runner, Stdout: cmd.OutOrStdout(), Log: log}
 			if err := installer.Install(cmd.Context(), manifest); err != nil {
 				return err
 			}
@@ -110,9 +107,36 @@ func newDistributionInstallCmd() *cobra.Command {
 		},
 	}
 
+	addDistributionInstallerFlags(cmd, &cfg, repoOptions, &interactive)
+	return cmd
+}
+
+func newDistributionInstaller(cmd *cobra.Command, cfg cloudinstall.Config) (*cloudinstall.Installer, io.WriteCloser, error) {
+	runner, err := cloudinstall.NewCommandRunner(cmd.OutOrStdout(), cmd.ErrOrStderr())
+	if err != nil {
+		return nil, nil, err
+	}
+	var log io.WriteCloser
+	if !cfg.DryRun {
+		if err := os.MkdirAll(cfg.ConfigDir, 0o700); err != nil {
+			return nil, nil, fmt.Errorf("create installer config directory: %w", err)
+		}
+		log, err = os.OpenFile(filepath.Join(cfg.ConfigDir, "install.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open installer log: %w", err)
+		}
+	}
+	return &cloudinstall.Installer{Config: cfg, Runner: runner, Stdout: cmd.OutOrStdout(), Log: log}, log, nil
+}
+
+func addDistributionInstallerFlags(cmd *cobra.Command, cfg *cloudinstall.Config, repoOptions *repositoryCommandOptions, interactive *bool) {
 	flags := cmd.Flags()
-	flags.BoolVar(&interactive, "interactive", interactive, "prompt for missing installation values")
-	repoOptions.addFlags(cmd)
+	if interactive != nil {
+		flags.BoolVar(interactive, "interactive", *interactive, "prompt for missing installation values")
+	}
+	if repoOptions != nil {
+		repoOptions.addFlags(cmd)
+	}
 	flags.StringVarP(&cfg.Distribution, "distribution", "d", cfg.Distribution, "distribution reference, for example cloud-pro@v5.1.2-rc6")
 	flags.StringVar((*string)(&cfg.PackageMode), "package-mode", string(cfg.PackageMode), "resolve packages from remote images, source builds, or hybrid source/remote mode")
 	flags.StringVar(&cfg.SourceRoot, "source-root", cfg.SourceRoot, "compatibility base for relative local package source paths")
@@ -141,8 +165,9 @@ func newDistributionInstallCmd() *cobra.Command {
 	flags.BoolVar(&cfg.Proxy, "proxy", cfg.Proxy, "rewrite ghcr.io images through the proxy")
 	flags.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "print the installation commands without executing them")
 	flags.StringVar(&cfg.ConfigDir, "config-dir", cfg.ConfigDir, "local directory for installer logs")
+	flags.StringVar(&cfg.StateDir, "state-dir", cfg.StateDir, "package state directory")
+	flags.StringVar(&cfg.TargetID, "target-id", cfg.TargetID, "stable package state target identifier")
 	flags.DurationVar(&cfg.WaitTimeout, "wait-timeout", cfg.WaitTimeout, "maximum time to wait for cluster resources")
-	return cmd
 }
 
 func promptInstallConfig(cmd *cobra.Command, cfg *cloudinstall.Config, positionalDistribution bool, repo *distribution.Repository) error {
@@ -355,5 +380,459 @@ func newDistributionValidateCmd() *cobra.Command {
 		},
 	}
 	opts.addFlags(cmd)
+	return cmd
+}
+
+func addDistributionStateFlags(cmd *cobra.Command, cfg *cloudinstall.Config, repoOptions *repositoryCommandOptions) {
+	if repoOptions != nil {
+		repoOptions.addFlags(cmd)
+	}
+	flags := cmd.Flags()
+	flags.StringVar((*string)(&cfg.PackageMode), "package-mode", string(cfg.PackageMode), "resolve packages from remote images, source builds, or hybrid source/remote mode")
+	flags.StringVar(&cfg.SourceRoot, "source-root", cfg.SourceRoot, "compatibility base for relative local package source paths")
+	flags.StringVar(&cfg.SourceCache, "source-cache", cfg.SourceCache, "persistent cache directory for Git package sources")
+	flags.StringVar(&cfg.Masters, "masters", cfg.Masters, "comma-separated master nodes")
+	flags.Uint16Var(&cfg.SSHPort, "ssh-port", cfg.SSHPort, "SSH port")
+	flags.StringVar(&cfg.StateDir, "state-dir", cfg.StateDir, "package state directory")
+	flags.StringVar(&cfg.TargetID, "target-id", cfg.TargetID, "stable package state target identifier")
+	flags.StringVar(&cfg.CiliumVersion, "cilium-version", cfg.CiliumVersion, "Cilium package version for distributions with multiple Cilium packages")
+}
+
+func distributionTargetID(cfg cloudinstall.Config) (string, error) {
+	if strings.TrimSpace(cfg.TargetID) != "" {
+		return cfg.TargetID, nil
+	}
+	if strings.TrimSpace(cfg.Masters) == "" {
+		return "", errors.New("masters or target-id is required")
+	}
+	return distribution.TargetID(cfg.Masters, cfg.SSHPort), nil
+}
+
+func loadDistributionDiff(repo *distribution.Repository, ref string, cfg cloudinstall.Config) (distribution.Diff, error) {
+	manifest, err := repo.Load(ref)
+	if err != nil {
+		return distribution.Diff{}, err
+	}
+	resolved, err := cloudinstall.ResolveInstalledPackages(manifest, distribution.ResolveOptions{
+		Mode:        cfg.PackageMode,
+		SourceRoot:  cfg.SourceRoot,
+		SourceCache: cfg.SourceCache,
+		WorkDir:     cfg.ConfigDir,
+	}, cfg.CiliumVersion)
+	if err != nil {
+		return distribution.Diff{}, err
+	}
+	targetID, err := distributionTargetID(cfg)
+	if err != nil {
+		return distribution.Diff{}, err
+	}
+	store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+	if err != nil {
+		return distribution.Diff{}, err
+	}
+	state, err := store.Load()
+	if err != nil {
+		if errors.Is(err, distribution.ErrPackageStateNotFound) {
+			return distribution.Diff{}, fmt.Errorf("%w; run distribution adopt %s first", err, ref)
+		}
+		return distribution.Diff{}, err
+	}
+	diff, err := distribution.Compare(manifest, resolved, state, targetID)
+	if err != nil {
+		return distribution.Diff{}, err
+	}
+	return classifyIncrementalChanges(diff), nil
+}
+
+func classifyIncrementalChanges(diff distribution.Diff) distribution.Diff {
+	for index := range diff.Changes {
+		change := &diff.Changes[index]
+		if change.Desired == nil || (change.Kind != distribution.ChangeAdded && change.Kind != distribution.ChangeChanged) {
+			continue
+		}
+		if reason := cloudinstall.IncrementalPackageBlockReason(change.Desired.Package.Name); reason != "" {
+			change.Kind = distribution.ChangeBlocked
+			change.Reason = reason
+		}
+	}
+	return diff
+}
+
+func printDistributionDiff(out io.Writer, diff distribution.Diff) {
+	for _, change := range diff.Changes {
+		ref := ""
+		if change.Desired != nil {
+			ref = change.Desired.Package.Ref()
+		} else if change.Installed != nil {
+			ref = change.Installed.Ref()
+		}
+		symbol := map[distribution.ChangeKind]string{
+			distribution.ChangeAdded:     "+",
+			distribution.ChangeChanged:   "~",
+			distribution.ChangeUnchanged: "=",
+			distribution.ChangeOrphan:    "-",
+			distribution.ChangeBlocked:   "!",
+		}[change.Kind]
+		if change.Kind == distribution.ChangeChanged && change.Installed != nil && change.Desired != nil {
+			fmt.Fprintf(out, "%s %s -> %s\n", symbol, change.Installed.Ref(), ref)
+			continue
+		}
+		if change.Reason != "" {
+			fmt.Fprintf(out, "%s %s (%s)\n", symbol, ref, change.Reason)
+			continue
+		}
+		fmt.Fprintf(out, "%s %s\n", symbol, ref)
+	}
+}
+
+func newDistributionDiffCmd() *cobra.Command {
+	cfg := cloudinstall.ConfigFromEnv(os.LookupEnv)
+	repoOptions := newRepositoryCommandOptions()
+	cmd := &cobra.Command{
+		Use:   "diff <distribution@version>",
+		Short: "Compare a distribution with the recorded package state",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := repoOptions.validate(cmd); err != nil {
+				return err
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), repoOptions.config)
+			if err != nil {
+				return err
+			}
+			diff, err := loadDistributionDiff(repo, args[0], cfg)
+			if err != nil {
+				return err
+			}
+			printDistributionDiff(cmd.OutOrStdout(), diff)
+			return nil
+		},
+	}
+	addDistributionStateFlags(cmd, &cfg, repoOptions)
+	return cmd
+}
+
+func newDistributionUpdateCmd() *cobra.Command {
+	cfg := cloudinstall.ConfigFromEnv(os.LookupEnv)
+	repoOptions := newRepositoryCommandOptions()
+	interactive := true
+	yes := false
+	cmd := &cobra.Command{
+		Use:   "update <distribution@version>",
+		Short: "Apply a distribution update to the recorded target",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg.Distribution = args[0]
+			if err := repoOptions.validate(cmd); err != nil {
+				return err
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), repoOptions.config)
+			if err != nil {
+				return err
+			}
+			if interactive {
+				if err := promptInstallConfig(cmd, &cfg, true, repo); err != nil {
+					return err
+				}
+			}
+			if err := cfg.Validate(); err != nil {
+				return fmt.Errorf("invalid update configuration: %w", err)
+			}
+			status, err := repo.Status()
+			if err != nil {
+				return err
+			}
+			cfg.RepositoryCommit = status.Commit
+			diff, err := loadDistributionDiff(repo, args[0], cfg)
+			if err != nil {
+				return err
+			}
+			printDistributionDiff(cmd.OutOrStdout(), diff)
+			if blocked := diff.ByKind(distribution.ChangeBlocked); len(blocked) > 0 {
+				return fmt.Errorf("distribution update contains %d blocked package change(s)", len(blocked))
+			}
+			actionable := distributionActionableChanges(diff)
+			if len(actionable) == 0 {
+				return updateDistributionMetadata(cfg, diff, cfg.RepositoryCommit)
+			}
+			if cfg.DryRun {
+				return nil
+			}
+			approved := make([]distribution.PackageChange, 0, len(actionable))
+			deferred := false
+			added := diff.ByKind(distribution.ChangeAdded)
+			if len(added) > 0 && !yes {
+				confirm := promptui.Select{Label: fmt.Sprintf("Install %d new package(s)", len(added)), Items: []string{"yes", "no"}, CursorPos: 1}
+				_, answer, err := confirm.Run()
+				if err != nil {
+					return err
+				}
+				if answer != "yes" {
+					return nil
+				}
+			}
+			for _, change := range actionable {
+				if change.Kind != distribution.ChangeChanged || yes {
+					approved = append(approved, change)
+					continue
+				}
+				confirm := promptui.Select{Label: fmt.Sprintf("Update %s", change.Desired.Package.Ref()), Items: []string{"yes", "no"}, CursorPos: 1}
+				_, answer, err := confirm.Run()
+				if err != nil {
+					return err
+				}
+				if answer == "yes" {
+					approved = append(approved, change)
+				} else {
+					deferred = true
+				}
+			}
+			if len(approved) == 0 {
+				return nil
+			}
+			return applyDistributionUpdate(cmd, cfg, args[0], diff, approved, !deferred)
+		},
+	}
+	addDistributionInstallerFlags(cmd, &cfg, repoOptions, &interactive)
+	cmd.Flags().BoolVar(&yes, "yes", false, "apply the update without confirmation")
+	return cmd
+}
+
+func distributionActionableChanges(diff distribution.Diff) []distribution.PackageChange {
+	changes := make([]distribution.PackageChange, 0)
+	for _, change := range diff.Changes {
+		if change.Kind == distribution.ChangeAdded || change.Kind == distribution.ChangeChanged {
+			changes = append(changes, change)
+		}
+	}
+	return changes
+}
+
+func updateDistributionMetadata(cfg cloudinstall.Config, diff distribution.Diff, repositoryCommit string) error {
+	targetID, err := distributionTargetID(cfg)
+	if err != nil {
+		return err
+	}
+	store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+	if err != nil {
+		return err
+	}
+	unlock, err := store.Lock(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	state, err := store.Load()
+	if err != nil {
+		return err
+	}
+	state.Distribution = diff.Distribution
+	state.ManifestFingerprint = diff.ManifestFingerprint
+	state.RepositoryCommit = repositoryCommit
+	return store.Save(state)
+}
+
+func applyDistributionUpdate(cmd *cobra.Command, cfg cloudinstall.Config, ref string, diff distribution.Diff, actionable []distribution.PackageChange, advanceDistribution bool) error {
+	targetID, err := distributionTargetID(cfg)
+	if err != nil {
+		return err
+	}
+	store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+	if err != nil {
+		return err
+	}
+	unlock, err := store.Lock(cmd.Context())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	state, err := store.Load()
+	if err != nil {
+		return err
+	}
+	transaction := &distribution.Transaction{
+		ID:                  fmt.Sprintf("%d", time.Now().UnixNano()),
+		Distribution:        ref,
+		ManifestFingerprint: diff.ManifestFingerprint,
+		Status:              distribution.TransactionPending,
+		Packages:            make([]distribution.TransactionPackage, 0, len(actionable)),
+	}
+	for _, change := range actionable {
+		action := "install"
+		if change.Kind == distribution.ChangeChanged {
+			action = "update"
+		}
+		transaction.Packages = append(transaction.Packages, distribution.TransactionPackage{Ref: change.Desired.Package.Ref(), Action: action, Status: "pending"})
+	}
+	if err := store.SaveTransaction(transaction); err != nil {
+		return err
+	}
+	transaction.Status = distribution.TransactionApplying
+	if err := store.SaveTransaction(transaction); err != nil {
+		return err
+	}
+	installer, log, err := newDistributionInstaller(cmd, cfg)
+	if err != nil {
+		transaction.Status = distribution.TransactionFailed
+		transaction.Error = err.Error()
+		_ = store.SaveTransaction(transaction)
+		return err
+	}
+	if log != nil {
+		defer log.Close()
+	}
+	for index, change := range actionable {
+		item := *change.Desired
+		alreadyInstalled := false
+		for _, installed := range state.Packages {
+			if installed.Name == item.Package.Name && installed.Fingerprint == item.Package.Fingerprint() {
+				alreadyInstalled = true
+				break
+			}
+		}
+		if alreadyInstalled {
+			transaction.Packages[index].Status = distribution.PackageStatusInstalled
+			if err := store.SaveTransaction(transaction); err != nil {
+				return err
+			}
+			continue
+		}
+		if err := installer.InstallIncrementalPackage(cmd.Context(), item); err != nil {
+			transaction.Packages[index].Status = distribution.TransactionFailed
+			transaction.Packages[index].Error = err.Error()
+			transaction.Status = distribution.TransactionFailed
+			transaction.Error = err.Error()
+			_ = store.SaveTransaction(transaction)
+			return fmt.Errorf("update package %s: %w", item.Package.Ref(), err)
+		}
+		transaction.Packages[index].Status = distribution.PackageStatusInstalled
+		if err := store.SaveTransaction(transaction); err != nil {
+			return err
+		}
+		upsertInstalledPackage(state, item, cfg.PackageMode)
+		if err := store.Save(state); err != nil {
+			return fmt.Errorf("save package state after %s: %w", item.Package.Ref(), err)
+		}
+	}
+	if advanceDistribution {
+		state.Distribution = diff.Distribution
+		state.ManifestFingerprint = diff.ManifestFingerprint
+		state.RepositoryCommit = cfg.RepositoryCommit
+	}
+	if err := store.Save(state); err != nil {
+		return err
+	}
+	transaction.Status = distribution.TransactionSucceeded
+	if err := store.SaveTransaction(transaction); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "distribution update completed: %s\n", ref)
+	return nil
+}
+
+func upsertInstalledPackage(state *distribution.State, item distribution.ResolvedPackage, mode distribution.ResolveMode) {
+	installed := distribution.NewInstalledPackage(item.Package, item.Image, mode, distribution.PackageStatusInstalled)
+	for index := range state.Packages {
+		if state.Packages[index].Name == installed.Name {
+			state.Packages[index] = installed
+			return
+		}
+	}
+	state.Packages = append(state.Packages, installed)
+}
+
+func newDistributionAdoptCmd() *cobra.Command {
+	cfg := cloudinstall.ConfigFromEnv(os.LookupEnv)
+	repoOptions := newRepositoryCommandOptions()
+	yes := false
+	cmd := &cobra.Command{
+		Use:   "adopt <distribution@version>",
+		Short: "Record an existing distribution as installed",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := repoOptions.validate(cmd); err != nil {
+				return err
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), repoOptions.config)
+			if err != nil {
+				return err
+			}
+			manifest, err := repo.Load(args[0])
+			if err != nil {
+				return err
+			}
+			status, err := repo.Status()
+			if err != nil {
+				return err
+			}
+			targetID, err := distributionTargetID(cfg)
+			if err != nil {
+				return err
+			}
+			store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+			if err != nil {
+				return err
+			}
+			unlock, err := store.Lock(cmd.Context())
+			if err != nil {
+				return err
+			}
+			defer unlock()
+			if _, err := store.Load(); err == nil && !yes {
+				return errors.New("package state already exists; use --yes to replace it")
+			} else if err != nil && !errors.Is(err, distribution.ErrPackageStateNotFound) {
+				return err
+			}
+			packages, err := cloudinstall.InstalledPackages(manifest, cfg.PackageMode, cfg.CiliumVersion)
+			if err != nil {
+				return err
+			}
+			for index := range packages {
+				packages[index].Status = distribution.PackageStatusAdopted
+			}
+			if err := store.Save(&distribution.State{
+				Distribution:        manifest.Ref(),
+				ManifestFingerprint: manifest.Fingerprint(),
+				RepositoryCommit:    status.Commit,
+				Packages:            packages,
+			}); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "adopted distribution: %s\n", manifest.Ref())
+			return nil
+		},
+	}
+	addDistributionStateFlags(cmd, &cfg, repoOptions)
+	cmd.Flags().BoolVar(&yes, "yes", false, "replace an existing package state")
+	return cmd
+}
+
+func newDistributionStatusCmd() *cobra.Command {
+	cfg := cloudinstall.ConfigFromEnv(os.LookupEnv)
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show the recorded package state",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			targetID, err := distributionTargetID(cfg)
+			if err != nil {
+				return err
+			}
+			store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+			if err != nil {
+				return err
+			}
+			state, err := store.Load()
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "target: %s\ndistribution: %s\nmanifest: %s\n", state.TargetID, state.Distribution, state.ManifestFingerprint)
+			for _, pkg := range state.Packages {
+				fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", pkg.Ref(), pkg.Status)
+			}
+			return nil
+		},
+	}
+	addDistributionStateFlags(cmd, &cfg, nil)
 	return cmd
 }

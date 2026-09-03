@@ -73,6 +73,28 @@ sealos distribution list
 sealos distribution install cloud-pro@v5.1.2-rc6
 ```
 
+After installing a distribution, the CLI records its package state on the control machine under
+`/var/lib/sealos/package-state/`. Repository synchronization only updates the local catalog; it does not change a
+cluster. To inspect and apply a newer SOTW manifest:
+
+```shell
+sealos distribution diff cloud-pro@v5.1.2-rc7 --masters 192.0.2.10
+sealos distribution update cloud-pro@v5.1.2-rc7 --masters 192.0.2.10
+sealos distribution status --masters 192.0.2.10
+```
+
+New packages are installed in SOTW order. Changed standalone packages are applied after confirmation. Kubernetes,
+Cilium, and Cloud aggregate package changes are reported as blocked, while packages removed from a newer SOTW are
+reported as orphaned and are not automatically uninstalled. Use `--yes` for non-interactive updates. An existing
+cluster created before package-state tracking must be adopted explicitly:
+
+```shell
+sealos distribution adopt cloud-pro@v5.1.2-rc6 --masters 192.0.2.10
+```
+
+Use `--target-id` when the same control machine manages multiple targets, and `--state-dir` to select a different
+state root for an isolated environment or test.
+
 Use `--refresh` to force a repository update or `--offline` to use the existing cache. The repository can be
 overridden with `--repo`, `--repo-ref`, and `--repo-cache`, or with `SEALOS_PACKAGE_REPO`,
 `SEALOS_PACKAGE_REPO_REF`, and `SEALOS_PACKAGE_REPO_CACHE`. The default repository is

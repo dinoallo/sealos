@@ -131,12 +131,15 @@ global_http_external_url() {
 
 // Config contains the inputs required by the Sealos Cloud installer.
 type Config struct {
-	Distribution string
-	PackageMode  distribution.ResolveMode
-	SourceRoot   string
-	SourceCache  string
-	Masters      string
-	Nodes        string
+	Distribution     string
+	PackageMode      distribution.ResolveMode
+	SourceRoot       string
+	SourceCache      string
+	StateDir         string
+	TargetID         string
+	RepositoryCommit string
+	Masters          string
+	Nodes            string
 
 	User         string
 	SSHPassword  string
@@ -182,6 +185,7 @@ func DefaultConfig() Config {
 		// remains a fallback for legacy manifests that use relative paths.
 		SourceRoot:           currentDirectory(),
 		SourceCache:          distribution.DefaultSourceCache(),
+		StateDir:             distribution.DefaultPackageStateDir,
 		CloudPort:            DefaultCloudPort,
 		MaxPods:              120,
 		OpenEBSStorage:       "/var/openebs",
@@ -249,6 +253,8 @@ func ConfigFromEnv(lookup func(string) (string, bool)) Config {
 	setString("SEALOS_V2_PACKAGE_MODE", (*string)(&cfg.PackageMode))
 	setString("SEALOS_V2_SOURCE_ROOT", &cfg.SourceRoot)
 	setString("SEALOS_V2_SOURCE_CACHE", &cfg.SourceCache)
+	setString("SEALOS_PACKAGE_STATE_DIR", &cfg.StateDir)
+	setString("SEALOS_PACKAGE_TARGET_ID", &cfg.TargetID)
 	setString("SEALOS_V2_MASTERS", &cfg.Masters)
 	setString("SEALOS_V2_NODES", &cfg.Nodes)
 	setString("SEALOS_V2_SSH_KEY", &cfg.SSHKey)
@@ -306,6 +312,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.ConfigDir) == "" {
 		return errors.New("config directory is required")
+	}
+	if strings.TrimSpace(c.StateDir) == "" {
+		return errors.New("package state directory is required")
 	}
 	if (c.CertPath == "") != (c.KeyPath == "") {
 		return errors.New("cert path and key path must be provided together")
@@ -629,7 +638,10 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 		workDir = os.TempDir()
 	}
 	if manifest != nil && manifest.Name != "cloud" {
-		return i.installBootstrap(ctx, manifest, workDir)
+		if err := i.installBootstrap(ctx, manifest, workDir); err != nil {
+			return err
+		}
+		return i.recordInstalledState(ctx, manifest)
 	}
 	images, buildPlans, err := ResolveImagesWithOptions(manifest, distribution.ResolveOptions{
 		Mode:        i.Config.PackageMode,
@@ -735,7 +747,10 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	if err := i.runCloud(ctx, images, cloudConfig); err != nil {
 		return err
 	}
-	return i.run(ctx, i.runImage(images.Finish))
+	if err := i.run(ctx, i.runImage(images.Finish)); err != nil {
+		return err
+	}
+	return i.recordInstalledState(ctx, manifest)
 }
 
 func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution.Manifest, workDir string) error {
