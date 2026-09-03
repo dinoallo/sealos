@@ -44,6 +44,7 @@ func newDistributionCmd() *cobra.Command {
 
 func newDistributionInstallCmd() *cobra.Command {
 	cfg := cloudinstall.ConfigFromEnv(os.LookupEnv)
+	repoOptions := newRepositoryCommandOptions()
 	interactive := true
 	positionalDistribution := false
 
@@ -61,18 +62,27 @@ func newDistributionInstallCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := repoOptions.validate(cmd); err != nil {
+				return err
+			}
+			if !interactive {
+				if err := cfg.Validate(); err != nil {
+					return fmt.Errorf("invalid installation configuration: %w; provide the value with a flag or enable interactive prompts", err)
+				}
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), repoOptions.config)
+			if err != nil {
+				return err
+			}
 			if interactive {
-				if err := promptInstallConfig(cmd, &cfg, positionalDistribution); err != nil {
+				if err := promptInstallConfig(cmd, &cfg, positionalDistribution, repo); err != nil {
+					return err
+				}
+				if err := cfg.Validate(); err != nil {
 					return err
 				}
 			}
-			if err := cfg.Validate(); err != nil {
-				if !interactive {
-					return fmt.Errorf("invalid installation configuration: %w; provide the value with a flag or enable interactive prompts", err)
-				}
-				return err
-			}
-			manifest, err := distribution.Load(cfg.Distribution)
+			manifest, err := repo.Load(cfg.Distribution)
 			if err != nil {
 				return err
 			}
@@ -102,7 +112,8 @@ func newDistributionInstallCmd() *cobra.Command {
 
 	flags := cmd.Flags()
 	flags.BoolVar(&interactive, "interactive", interactive, "prompt for missing installation values")
-	flags.StringVarP(&cfg.Distribution, "distribution", "d", cfg.Distribution, "distribution reference, for example cloud@v5.1.0")
+	repoOptions.addFlags(cmd)
+	flags.StringVarP(&cfg.Distribution, "distribution", "d", cfg.Distribution, "distribution reference, for example cloud-pro@v5.1.2-rc6")
 	flags.StringVar((*string)(&cfg.PackageMode), "package-mode", string(cfg.PackageMode), "resolve packages from remote images, source builds, or hybrid source/remote mode")
 	flags.StringVar(&cfg.SourceRoot, "source-root", cfg.SourceRoot, "compatibility base for relative local package source paths")
 	flags.StringVar(&cfg.SourceCache, "source-cache", cfg.SourceCache, "persistent cache directory for Git package sources")
@@ -122,6 +133,7 @@ func newDistributionInstallCmd() *cobra.Command {
 	flags.StringVar(&cfg.PodCIDR, "pod-cidr", cfg.PodCIDR, "Kubernetes pod CIDR")
 	flags.StringVar(&cfg.ServiceCIDR, "service-cidr", cfg.ServiceCIDR, "Kubernetes service CIDR")
 	flags.StringVar(&cfg.ServiceNodePortRange, "service-nodeport-range", cfg.ServiceNodePortRange, "Kubernetes NodePort range")
+	flags.StringVar(&cfg.CiliumVersion, "cilium-version", cfg.CiliumVersion, "Cilium package version for distributions with multiple Cilium packages")
 	flags.StringVar(&cfg.CiliumMaskSize, "cilium-masksize", cfg.CiliumMaskSize, "Cilium node mask size")
 	flags.StringVar(&cfg.CertPath, "cert-path", cfg.CertPath, "TLS certificate PEM path")
 	flags.StringVar(&cfg.KeyPath, "key-path", cfg.KeyPath, "TLS private key PEM path")
@@ -133,20 +145,20 @@ func newDistributionInstallCmd() *cobra.Command {
 	return cmd
 }
 
-func promptInstallConfig(cmd *cobra.Command, cfg *cloudinstall.Config, positionalDistribution bool) error {
+func promptInstallConfig(cmd *cobra.Command, cfg *cloudinstall.Config, positionalDistribution bool, repo *distribution.Repository) error {
 	if !cmd.Flags().Changed("distribution") && !positionalDistribution {
-		summaries, err := distribution.List()
+		summaries, err := repo.List()
 		if err != nil {
 			return err
 		}
 		items := make([]string, 0, len(summaries))
 		selected := 0
 		for _, summary := range summaries {
-			manifest, err := distribution.Load(summary.Ref())
+			manifest, err := repo.Load(summary.Ref())
 			if err != nil {
 				return err
 			}
-			if _, err := cloudinstall.ResolveImages(manifest); err != nil {
+			if err := cloudinstall.ValidateManifest(manifest, distribution.ResolveOptions{Mode: cfg.PackageMode}); err != nil {
 				continue
 			}
 			items = append(items, summary.Ref())
@@ -245,12 +257,20 @@ func promptValue(label, defaultValue string, required, secret bool) (string, err
 }
 
 func newDistributionListCmd() *cobra.Command {
-	return &cobra.Command{
+	opts := newRepositoryCommandOptions()
+	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List available distributions",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			summaries, err := distribution.List()
+			if err := opts.validate(cmd); err != nil {
+				return err
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), opts.config)
+			if err != nil {
+				return err
+			}
+			summaries, err := repo.List()
 			if err != nil {
 				return err
 			}
@@ -260,15 +280,25 @@ func newDistributionListCmd() *cobra.Command {
 			return nil
 		},
 	}
+	opts.addFlags(cmd)
+	return cmd
 }
 
 func newDistributionShowCmd() *cobra.Command {
-	return &cobra.Command{
+	opts := newRepositoryCommandOptions()
+	cmd := &cobra.Command{
 		Use:   "show <distribution@version>",
 		Short: "Show a distribution manifest",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			data, err := distribution.Show(args[0])
+			if err := opts.validate(cmd); err != nil {
+				return err
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), opts.config)
+			if err != nil {
+				return err
+			}
+			data, err := repo.Show(args[0])
 			if err != nil {
 				return err
 			}
@@ -276,15 +306,25 @@ func newDistributionShowCmd() *cobra.Command {
 			return nil
 		},
 	}
+	opts.addFlags(cmd)
+	return cmd
 }
 
 func newDistributionResolveCmd() *cobra.Command {
-	return &cobra.Command{
+	opts := newRepositoryCommandOptions()
+	cmd := &cobra.Command{
 		Use:   "resolve <distribution@version>",
 		Short: "Resolve a distribution to a list of image references",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			images, err := distribution.Resolve(args[0])
+			if err := opts.validate(cmd); err != nil {
+				return err
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), opts.config)
+			if err != nil {
+				return err
+			}
+			images, err := repo.Resolve(args[0])
 			if err != nil {
 				return err
 			}
@@ -292,16 +332,28 @@ func newDistributionResolveCmd() *cobra.Command {
 			return nil
 		},
 	}
+	opts.addFlags(cmd)
+	return cmd
 }
 
 func newDistributionValidateCmd() *cobra.Command {
-	return &cobra.Command{
+	opts := newRepositoryCommandOptions()
+	cmd := &cobra.Command{
 		Use:   "validate <distribution@version>",
 		Short: "Validate a distribution manifest",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			_, err := distribution.Load(args[0])
+			if err := opts.validate(cmd); err != nil {
+				return err
+			}
+			repo, err := distribution.OpenRepository(cmd.Context(), opts.config)
+			if err != nil {
+				return err
+			}
+			_, err = repo.Load(args[0])
 			return err
 		},
 	}
+	opts.addFlags(cmd)
+	return cmd
 }

@@ -1,0 +1,15 @@
+name: demo-web
+version: v0.1.0
+description: Example independently reusable package
+remote:
+  image: ghcr.io/example/demo-web:v0.1.0
+sources:
+  - type: local
+    path: /workspace/demo-web
+    context: deploy
+    file: Kubefile
+  - type: git
+    url: https://github.com/example/demo-web.git
+    ref: v0.1.0
+    context: deploy
+    file: Kubefile

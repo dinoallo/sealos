@@ -17,7 +17,6 @@ package distribution
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -35,52 +34,39 @@ func TestParseRefRejectsInvalidRef(t *testing.T) {
 	require.Error(t, err)
 }
 
-func TestLoadCloudManifest(t *testing.T) {
-	manifest, err := Load("cloud@v5.1.0")
-	require.NoError(t, err)
-	require.Equal(t, "cloud", manifest.Name)
-	require.Equal(t, "v5.1.0", manifest.Version)
-	require.Len(t, manifest.Packages, 31)
-	require.Equal(t, PackageRef{Name: "kubernetes", Version: "v1.28.15"}, manifest.Packages[0])
-	require.Equal(t, PackageRef{Name: "sealos-cloud-launchpad-service", Version: "v5.1.0"}, manifest.Packages[len(manifest.Packages)-1])
-	images, err := Resolve("cloud@v5.1.0")
-	require.NoError(t, err)
-	require.Equal(t, "ghcr.io/labring/sealos/kubernetes:v1.28.15", images[0])
-	require.Equal(t, "ghcr.io/labring/sealos-cloud-launchpad-service:v5.1.0", images[len(images)-1])
-	require.NotContains(t, strings.Join(images, "\n"), "sealos.hub:5000")
+func TestParseRefRejectsPathTraversal(t *testing.T) {
+	for _, ref := range []string{"../cloud@v1.0.0", "cloud@../v1.0.0", "cloud@v1/0.0", "cloud@v1\\0.0"} {
+		_, _, err := ParseRef(ref)
+		require.Error(t, err, ref)
+	}
 }
 
-func TestLoadCloudProManifest(t *testing.T) {
-	manifest, err := Load("cloud-pro@v5.1.2-rc5-fix01")
-	require.NoError(t, err)
-	require.Equal(t, "cloud-pro", manifest.Name)
-	require.Equal(t, "v5.1.2-rc5-fix01", manifest.Version)
-	require.Len(t, manifest.Packages, 35)
-	require.Equal(t, PackageRef{Name: "sealos-pro-kubernetes", Version: "v1.28.15"}, manifest.Packages[0])
-	require.Contains(t, manifest.Packages, PackageRef{Name: "sealos-pro-devbox", Version: "v1"})
-	require.Contains(t, manifest.Packages, PackageRef{Name: "sealos-cloud-admission-webhook", Version: "sha-568d00f70"})
-	require.Equal(t, PackageRef{Name: "sealos-cloud-vlogs-service", Version: "sha-ae2f7dc3d"}, manifest.Packages[len(manifest.Packages)-1])
-	images, err := Resolve("cloud-pro@v5.1.2-rc5-fix01")
-	require.NoError(t, err)
-	require.Equal(t, "sealos-pro.hub:19999/labring/sealos-pro:kubernetes-v1.28.15", images[0])
-	require.Equal(t, "sealos-pro.hub:19999/labring/sealos-cloud-vlogs-service:sha-ae2f7dc3d", images[len(images)-1])
-}
+func TestRepositoryLoadsSelfContainedManifest(t *testing.T) {
+	root := t.TempDir()
+	manifestDir := filepath.Join(root, "distributions", "cloud")
+	packageDir := filepath.Join(root, "packages", "example")
+	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
+	require.NoError(t, os.MkdirAll(packageDir, 0o755))
+	manifestData := "name: cloud\nversion: v1.0.0\npackages:\n  - name: example\n    version: v1.0.0\n    remote:\n      image: ghcr.io/example/package:v1.0.0\n      digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte(manifestData), 0o644))
+	packageData := "name: example\nversion: v1.0.0\nremote:\n  image: ghcr.io/example/package:v1.0.0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(packageDir, "v1.0.0.yaml"), []byte(packageData), 0o644))
 
-func TestList(t *testing.T) {
-	summaries, err := List()
+	repo, err := OpenLocalRepository(root)
 	require.NoError(t, err)
-	require.Equal(t, []Summary{
-		{Name: "cloud", Version: "v5.1.0"},
-		{Name: "cloud-pro", Version: "v5.1.2-rc5-fix01"},
-	}, summaries)
-}
+	manifest, err := repo.Load("cloud@v1.0.0")
+	require.NoError(t, err)
+	require.Equal(t, "ghcr.io/example/package:v1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", manifest.Packages[0].Remote.Reference())
+	images, err := repo.Resolve("cloud@v1.0.0")
+	require.NoError(t, err)
+	require.Equal(t, []string{"ghcr.io/example/package:v1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, images)
 
-func TestShowUsesManifestFieldNames(t *testing.T) {
-	data, err := Show("cloud@v5.1.0")
+	summaries, err := repo.List()
 	require.NoError(t, err)
-	require.Contains(t, data, "name: cloud")
-	require.Contains(t, data, "version: v5.1.0")
-	require.Contains(t, data, "packages:")
+	require.Equal(t, []Summary{{Name: "cloud", Version: "v1.0.0"}}, summaries)
+	data, err := repo.Show("cloud@v1.0.0")
+	require.NoError(t, err)
+	require.Contains(t, data, "digest: sha256:")
 }
 
 func TestValidateRejectsDuplicates(t *testing.T) {
@@ -96,8 +82,16 @@ func TestValidateRejectsDuplicates(t *testing.T) {
 }
 
 func TestLoadPackageWithLocalSource(t *testing.T) {
-	pkg, err := LoadPackage("sealos-cloud-user-controller@v5.1.0")
-	require.NoError(t, err)
+	pkg := Package{
+		Name:    "sealos-cloud-user-controller",
+		Version: "v5.1.0",
+		Remote:  Remote{Image: "ghcr.io/labring/sealos-cloud-user-controller:v5.1.0"},
+		Sources: []Source{
+			{Type: SourceLocal, Path: "controllers/user/deploy", File: "Kubefile"},
+			{Type: SourceGit, URL: "https://github.com/labring/sealos.git", Ref: "v5.1.0", Context: "controllers/user/deploy", File: "Kubefile"},
+		},
+	}
+	require.NoError(t, pkg.Validate())
 	require.Equal(t, "ghcr.io/labring/sealos-cloud-user-controller:v5.1.0", pkg.Remote.Reference())
 	require.Len(t, pkg.Sources, 2)
 	require.Equal(t, SourceLocal, pkg.Sources[0].Type)
@@ -107,8 +101,12 @@ func TestLoadPackageWithLocalSource(t *testing.T) {
 }
 
 func TestResolveSourceBuildPlanForLocalPackage(t *testing.T) {
-	pkg, err := LoadPackage("sealos-cloud-user-controller@v5.1.0")
-	require.NoError(t, err)
+	pkg := Package{
+		Name:    "sealos-cloud-user-controller",
+		Version: "v5.1.0",
+		Remote:  Remote{Image: "ghcr.io/labring/sealos-cloud-user-controller:v5.1.0"},
+		Source:  &Source{Type: SourceLocal, Path: "controllers/user/deploy", File: "Kubefile"},
+	}
 
 	sourceRoot := t.TempDir()
 	contextDir := filepath.Join(sourceRoot, "controllers/user/deploy")
@@ -184,9 +182,10 @@ func TestResolveSourceRejectsPackageWithoutSource(t *testing.T) {
 	manifest := &Manifest{
 		Name:    "cloud",
 		Version: "test",
-		Packages: []PackageRef{{
+		Packages: []Package{{
 			Name:    "kubernetes",
 			Version: "v1.28.15",
+			Remote:  Remote{Image: "ghcr.io/labring/sealos/kubernetes:v1.28.15"},
 		}},
 	}
 	_, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveSource})
@@ -236,9 +235,10 @@ func TestHybridUsesRemoteWhenSourceIsUnavailable(t *testing.T) {
 	manifest := &Manifest{
 		Name:    "cloud",
 		Version: "test",
-		Packages: []PackageRef{{
+		Packages: []Package{{
 			Name:    "kubernetes",
 			Version: "v1.28.15",
+			Remote:  Remote{Image: "ghcr.io/labring/sealos/kubernetes:v1.28.15"},
 		}},
 	}
 	resolved, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveHybrid})

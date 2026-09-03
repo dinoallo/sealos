@@ -17,18 +17,21 @@ package install
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"errors"
+	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/labring/sealos/pkg/constants"
 	"github.com/labring/sealos/pkg/distribution"
 	"github.com/stretchr/testify/require"
 )
 
 func TestResolveImagesKeepsManifestOrder(t *testing.T) {
-	manifest, err := distribution.Load("cloud@v5.1.0")
-	require.NoError(t, err)
-
-	images, err := ResolveImages(manifest)
+	images, err := ResolveImages(testCloudManifest())
 	require.NoError(t, err)
 	require.Equal(t, "ghcr.io/labring/sealos/kubernetes:v1.28.15", images.Kubernetes)
 	require.Equal(t, "ghcr.io/labring/sealos-cloud:v5.1.0", images.Cloud)
@@ -36,15 +39,70 @@ func TestResolveImagesKeepsManifestOrder(t *testing.T) {
 	require.Equal(t, "ghcr.io/labring/sealos-cloud-launchpad-service:v5.1.0", images.CloudLaunchpadService)
 }
 
-func TestResolveImagesRejectsTrackingOnlyManifest(t *testing.T) {
-	manifest, err := distribution.Load("cloud-pro@v5.1.2-rc5-fix01")
-	require.NoError(t, err)
-
-	_, err = ResolveImages(manifest)
+func TestResolveImagesRejectsBootstrapManifest(t *testing.T) {
+	_, err := ResolveImages(&distribution.Manifest{Name: "cloud-pro", Version: "v5.1.2-rc6"})
 	require.ErrorContains(t, err, "not supported")
 }
 
+func TestValidateManifestAllowsCloudProBootstrap(t *testing.T) {
+	manifest := &distribution.Manifest{
+		Name:    "cloud-pro",
+		Version: "v5.1.2-rc6",
+		Packages: []distribution.Package{
+			{Name: "cilium", Version: "v1.16.9", Remote: distribution.Remote{Image: "ghcr.io/sealos-apps/sealos-pro:cilium-v1.16.9"}},
+			{Name: "kubernetes", Version: "v1.28.15", Remote: distribution.Remote{Image: "ghcr.io/sealos-apps/sealos-pro:kubernetes-v1.28.15"}},
+		},
+	}
+	require.NoError(t, ValidateManifest(manifest, distribution.ResolveOptions{Mode: distribution.ResolveRemote}))
+}
+
+func TestSelectCiliumImage(t *testing.T) {
+	resolved := []distribution.ResolvedPackage{
+		{Package: distribution.Package{Name: "cilium", Version: "v1.16.9"}, Image: "registry.example/cilium:v1.16.9"},
+		{Package: distribution.Package{Name: "cilium", Version: "v1.17.17"}, Image: "registry.example/cilium:v1.17.17"},
+	}
+
+	image, err := selectCiliumImage(resolved, "")
+	require.NoError(t, err)
+	require.Equal(t, "registry.example/cilium:v1.16.9", image)
+
+	image, err = selectCiliumImage(resolved, "v1.17.17")
+	require.NoError(t, err)
+	require.Equal(t, "registry.example/cilium:v1.17.17", image)
+
+	_, err = selectCiliumImage(resolved, "v1.13.18")
+	require.ErrorContains(t, err, `version "v1.13.18" is unavailable`)
+}
+
+func TestCloudProRC6SOTWIsInstallable(t *testing.T) {
+	_, sourceFile, _, ok := runtime.Caller(0)
+	require.True(t, ok)
+	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", ".."))
+	repo, err := distribution.OpenLocalRepository(filepath.Join(repoRoot, "examples", "package-repository"))
+	require.NoError(t, err)
+	manifest, err := repo.Load("cloud-pro@v5.1.2-rc6")
+	require.NoError(t, err)
+
+	cfg := DefaultConfig()
+	cfg.Masters = "192.0.2.10"
+	cfg.CloudDomain = "cloud.example.com"
+	cfg.DryRun = true
+	var output bytes.Buffer
+	installer := Installer{Config: cfg, Runner: noopRunner{}, Stdout: &output}
+	require.NoError(t, installer.Install(context.Background(), manifest))
+	images, err := repo.Resolve(manifest.Ref())
+	require.NoError(t, err)
+	for _, image := range images {
+		require.Contains(t, output.String(), "sealos pull -q "+image)
+	}
+	require.Contains(t, output.String(), "sealos run --force ghcr.io/sealos-apps/sealos-pro:cilium-v1.16.9")
+	require.Contains(t, output.String(), "Distribution installation completed with all packages processed")
+}
+
 func TestConfigValidation(t *testing.T) {
+	require.Equal(t, "cloud-pro@v5.1.2-rc6", DefaultConfig().Distribution)
+	require.Equal(t, "30000-50000", DefaultConfig().ServiceNodePortRange)
+	require.Equal(t, "v1.16.9", DefaultConfig().CiliumVersion)
 	cfg := DefaultConfig()
 	cfg.Masters = "192.0.2.10:22"
 	cfg.CloudDomain = "cloud.example.com"
@@ -53,9 +111,59 @@ func TestConfigValidation(t *testing.T) {
 	require.NoError(t, cfg.Validate())
 	cfg.PackageMode = distribution.ResolveHybrid
 	require.NoError(t, cfg.Validate())
+	cfg.ServiceNodePortRange = "32768-30000"
+	require.ErrorContains(t, cfg.Validate(), "must be within 1-65535 and ordered")
 
 	cfg.CloudDomain = ""
 	require.ErrorContains(t, cfg.Validate(), "cloud domain is required")
+}
+
+func TestServiceNodePortRangeCommand(t *testing.T) {
+	installer := Installer{Config: DefaultConfig()}
+	command := installer.serviceNodePortRangeCommand()
+	require.Equal(t, "sealos", command.Name)
+	require.Equal(t, []string{"exec", "--roles", "master"}, command.Args[:3])
+	require.Contains(t, command.Args[3], `node_port_range="30000-50000"`)
+	require.Contains(t, command.Args[3], "if grep -Eq")
+	require.Contains(t, command.Args[3], "exit 0")
+	require.Contains(t, command.Args[3], "sealos.io/service-node-port-range:")
+	require.Contains(t, command.Args[3], `cp "$tmp" "$manifest"`)
+	require.Contains(t, command.Args[3], `awk -v node_port_range="$node_port_range"`)
+	require.NotContains(t, command.Args[3], "sed -i")
+}
+
+func TestCloudRuntimeConfigCommand(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.PodCIDR = "10.244.0.0/16"
+	cfg.ServiceCIDR = "10.96.0.0/12"
+	cfg.ServiceNodePortRange = "31000-32000"
+	cfg.CiliumMaskSize = "24"
+	cfg.MaxPods = 200
+	installer := Installer{Config: cfg}
+	command := installer.cloudRuntimeConfigCommand()
+
+	require.Equal(t, "sealos", command.Name)
+	require.Equal(t, []string{"exec", "--roles", "master"}, command.Args[:3])
+	require.Contains(t, command.Args[3], "mkdir -p \"$root/scripts\" \"$root/values\" \"$root/bin\"")
+	require.Contains(t, command.Args[3], "mv \"$tools_tmp\" \"$root/scripts/tools.sh\"")
+	require.Contains(t, command.Args[3], "mv \"$values_tmp\" \"$root/values/global.yaml\"")
+	require.Contains(t, command.Args[3], "ln -s \"$(command -v yq)\" \"$root/bin/yq\"")
+	require.Contains(t, command.Args[3], "base64 -d")
+
+	toolsEncoded := command.Args[3][strings.Index(command.Args[3], "printf '%s' '")+len("printf '%s' '"):]
+	toolsEncoded = toolsEncoded[:strings.Index(toolsEncoded, "' | base64 -d")]
+	tools, err := base64.StdEncoding.DecodeString(toolsEncoded)
+	require.NoError(t, err)
+	require.Contains(t, string(tools), "ensure_global_values_ready_for_component")
+
+	valuesEncoded := command.Args[3][strings.LastIndex(command.Args[3], "printf '%s' '")+len("printf '%s' '"):]
+	valuesEncoded = valuesEncoded[:strings.Index(valuesEncoded, "' | base64 -d")]
+	values, err := base64.StdEncoding.DecodeString(valuesEncoded)
+	require.NoError(t, err)
+	require.Contains(t, string(values), "podCIDR: \"10.244.0.0/16\"")
+	require.Contains(t, string(values), "serviceNodePortRange: \"31000-32000\"")
+	require.Contains(t, string(values), "domain: \"\"")
+	require.Contains(t, string(values), "maxPods: 200")
 }
 
 func TestConfigFromEnv(t *testing.T) {
@@ -69,6 +177,7 @@ func TestConfigFromEnv(t *testing.T) {
 		"SEALOS_V2_PACKAGE_MODE":      "source",
 		"SEALOS_V2_SOURCE_ROOT":       "/workspace/sealos",
 		"SEALOS_V2_SOURCE_CACHE":      "/workspace/cache",
+		"SEALOS_V2_CILIUM_VERSION":    "v1.17.17",
 	}
 	cfg := ConfigFromEnv(func(key string) (string, bool) {
 		value, ok := values[key]
@@ -82,6 +191,7 @@ func TestConfigFromEnv(t *testing.T) {
 	require.Equal(t, distribution.ResolveSource, cfg.PackageMode)
 	require.Equal(t, "/workspace/sealos", cfg.SourceRoot)
 	require.Equal(t, "/workspace/cache", cfg.SourceCache)
+	require.Equal(t, "v1.17.17", cfg.CiliumVersion)
 }
 
 func TestCommandRedactsSecrets(t *testing.T) {
@@ -127,13 +237,152 @@ func TestDryRunDoesNotWaitForKubernetes(t *testing.T) {
 	cfg.DryRun = true
 	var output bytes.Buffer
 	installer := Installer{Config: cfg, Runner: noopRunner{}, Stdout: &output}
-	manifest, err := distribution.Load("cloud@v5.1.0")
+	require.NoError(t, installer.Install(context.Background(), testCloudManifest()))
+	require.Contains(t, output.String(), "sealos run --force ghcr.io/labring/sealos/sealos-certs:v0.1.0")
+}
+
+func TestNodesReadyRequiresAtLeastOneReadyNode(t *testing.T) {
+	require.False(t, nodesReady(nil))
+	require.False(t, nodesReady([]byte("")))
+	require.False(t, nodesReady([]byte("node-a   NotReady   control-plane")))
+	require.True(t, nodesReady([]byte("node-a   Ready   control-plane\nnode-b   Ready   <none>\n")))
+}
+
+func TestClusterStatusUsesMasterExecWhenMastersAreConfigured(t *testing.T) {
+	installer := Installer{Config: Config{Masters: "192.0.2.10:22"}}
+	require.Equal(t, Command{
+		Name: "sealos",
+		Args: []string{"exec", "--roles", "master", "--capture-output", "kubectl get nodes --no-headers"},
+	}, installer.clusterStatusCommand())
+}
+
+func TestClusterStatusUsesLocalKubeconfigWithoutMasters(t *testing.T) {
+	installer := Installer{}
+	command := installer.clusterStatusCommand()
+	require.Equal(t, "kubectl", command.Name)
+	require.Equal(t, []string{"--kubeconfig", constants.NewPathResolver("default").AdminFile(), "get", "nodes", "--no-headers"}, command.Args)
+}
+
+func TestCloudConfigReadsConfigMapAsJSON(t *testing.T) {
+	runner := &configMapRunner{}
+	installer := Installer{Config: Config{WaitTimeout: time.Second}, Runner: runner}
+
+	config, err := installer.cloudConfig(context.Background())
 	require.NoError(t, err)
+	require.Equal(t, "cloud.example.com", config.CloudDomain)
+	require.Equal(t, "postgres://global", config.DatabaseGlobalCockroach)
+	require.True(t, config.TLSRejectUnauthorized)
+	require.Len(t, runner.commands, 2)
+	require.Contains(t, runner.commands[0].Args, "json")
+}
+
+func TestObjectStorageCredentialsDecodeSecretData(t *testing.T) {
+	runner := &configMapRunner{}
+	installer := Installer{Config: Config{WaitTimeout: time.Second}, Runner: runner}
+
+	accessKey, secretKey, err := installer.objectStorageCredentials(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "minio-admin", accessKey)
+	require.Equal(t, "minio-secret", secretKey)
+}
+
+func TestObjectStorageCredentialsFallsBackToMinioUserSecret(t *testing.T) {
+	runner := &objectStorageCredentialRunner{}
+	installer := Installer{Config: Config{WaitTimeout: time.Second}, Runner: runner}
+
+	accessKey, secretKey, err := installer.objectStorageCredentials(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, "user-access", accessKey)
+	require.Equal(t, "user-secret", secretKey)
+}
+
+func TestInstallBootstrapsNonCloudDistribution(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Masters = "192.0.2.10:22"
+	cfg.CloudDomain = "cloud.example.com"
+	cfg.CiliumVersion = "v1.16.9"
+	cfg.DryRun = true
+	manifest := &distribution.Manifest{
+		Name:    "cloud-pro",
+		Version: "v5.1.2-rc6",
+		Packages: []distribution.Package{
+			{Name: "kubernetes", Version: "v1.28.15", Remote: distribution.Remote{Image: "registry.example/kubernetes:v1.28.15"}},
+			{Name: "cilium", Version: "v1.16.9", Remote: distribution.Remote{Image: "registry.example/cilium:v1.16.9"}},
+			{Name: "cert-manager", Version: "v1.19.1", Remote: distribution.Remote{Image: "registry.example/cert-manager:v1.19.1"}},
+		},
+	}
+	var output bytes.Buffer
+	installer := Installer{Config: cfg, Runner: noopRunner{}, Stdout: &output}
 	require.NoError(t, installer.Install(context.Background(), manifest))
-	require.Contains(t, output.String(), "sealos run ghcr.io/labring/sealos/sealos-certs:v0.1.0")
+	require.Contains(t, output.String(), "sealos run --force registry.example/kubernetes:v1.28.15")
+	require.Contains(t, output.String(), "sealos run --force registry.example/cilium:v1.16.9")
+	require.Contains(t, output.String(), "sealos pull -q registry.example/cert-manager:v1.19.1")
+	require.Contains(t, output.String(), "sealos run --force registry.example/cert-manager:v1.19.1")
+	require.Contains(t, output.String(), "Distribution installation completed with all packages processed")
+}
+
+func TestInstallRejectsIncompleteCloudPackageSet(t *testing.T) {
+	installer := Installer{Config: DefaultConfig()}
+	err := installer.installDistributionPackages(context.Background(), map[string]string{
+		"sealos-cloud-desktop-frontend": "ghcr.io/example/desktop:v1",
+	})
+	require.ErrorContains(t, err, `missing Cloud package "sealos-cloud-user-controller"`)
+}
+
+func TestWaitForDesktopAcceptsSealosDesktopPod(t *testing.T) {
+	runner := &podOutputRunner{output: []byte("sealos-desktop-7b7b7b7b7b-abcde 1/1 Running 0 10s\n")}
+	installer := Installer{Config: Config{WaitTimeout: time.Second}, Runner: runner}
+
+	require.NoError(t, installer.waitForDesktop(context.Background()))
 }
 
 type noopRunner struct{}
+
+type podOutputRunner struct {
+	output []byte
+}
+
+func (r *podOutputRunner) Run(context.Context, Command) error {
+	return nil
+}
+
+func (r *podOutputRunner) Output(context.Context, Command) ([]byte, error) {
+	return r.output, nil
+}
+
+type objectStorageCredentialRunner struct{}
+
+func (objectStorageCredentialRunner) Run(context.Context, Command) error {
+	return nil
+}
+
+func (objectStorageCredentialRunner) Output(_ context.Context, command Command) ([]byte, error) {
+	if strings.Contains(command.String(), "object-storage-secret") {
+		return []byte(`{"data":{"accesskey":"","secretkey":""}}`), nil
+	}
+	if strings.Contains(command.String(), "object-storage-user-0") {
+		return []byte(`{"data":{"CONSOLE_ACCESS_KEY":"dXNlci1hY2Nlc3M=","CONSOLE_SECRET_KEY":"dXNlci1zZWNyZXQ="}}`), nil
+	}
+	return nil, errors.New("unexpected command")
+}
+
+type configMapRunner struct {
+	commands []Command
+}
+
+func testCloudManifest() *distribution.Manifest {
+	packages := make([]distribution.Package, 0, len(testImages))
+	for _, image := range testImages {
+		colon := strings.LastIndex(image, ":")
+		slash := strings.LastIndex(image[:colon], "/")
+		packages = append(packages, distribution.Package{
+			Name:    image[slash+1 : colon],
+			Version: image[colon+1:],
+			Remote:  distribution.Remote{Image: image},
+		})
+	}
+	return &distribution.Manifest{Name: "cloud", Version: "v5.1.0", Packages: packages}
+}
 
 func (noopRunner) Run(context.Context, Command) error {
 	return nil
@@ -141,6 +390,21 @@ func (noopRunner) Run(context.Context, Command) error {
 
 func (noopRunner) Output(context.Context, Command) ([]byte, error) {
 	return nil, nil
+}
+
+func (r *configMapRunner) Run(context.Context, Command) error {
+	return nil
+}
+
+func (r *configMapRunner) Output(_ context.Context, command Command) ([]byte, error) {
+	r.commands = append(r.commands, command)
+	if strings.Contains(command.String(), "object-storage-secret") {
+		return []byte(`{"data":{"accesskey":"bWluaW8tYWRtaW4=","secretkey":"bWluaW8tc2VjcmV0"}}`), nil
+	}
+	if strings.Contains(command.String(), "cert-config") {
+		return []byte("self-signed"), nil
+	}
+	return []byte(`{"data":{"cloudDomain":"cloud.example.com","cloudPort":"443","regionUID":"region-1","databaseGlobalCockroachdbURI":"postgres://global","databaseLocalCockroachdbURI":"postgres://local","databaseMongodbURI":"mongodb://mongo","passwordSalt":"salt","jwtInternal":"internal","jwtRegional":"regional","jwtGlobal":"global"}}`), nil
 }
 
 var testImages = []string{

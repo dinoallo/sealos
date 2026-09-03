@@ -25,10 +25,7 @@ import (
 
 	"github.com/containers/image/v5/docker/reference"
 	"github.com/opencontainers/go-digest"
-	"sigs.k8s.io/yaml"
 )
-
-const packageCatalogPath = dataRoot + "/packages/catalog.yaml"
 
 var ErrPackageNotFound = errors.New("package definition not found")
 var ErrSourceUnavailable = errors.New("no usable package source")
@@ -90,10 +87,6 @@ func (p Package) Ref() string {
 	return p.Name + "@" + p.Version
 }
 
-type packageCatalog struct {
-	Packages []Package `json:"packages" yaml:"packages"`
-}
-
 type PackageSummary struct {
 	Name    string `json:"name" yaml:"name"`
 	Version string `json:"version" yaml:"version"`
@@ -151,43 +144,6 @@ func DefaultSourceCache() string {
 	return filepath.Join(os.TempDir(), "sealos", "sources")
 }
 
-func LoadPackage(ref string) (*Package, error) {
-	name, version, err := ParseRef(ref)
-	if err != nil {
-		return nil, err
-	}
-
-	catalog, err := loadCatalog()
-	if err != nil {
-		return nil, err
-	}
-	for index := range catalog.Packages {
-		pkg := &catalog.Packages[index]
-		if pkg.Name == name && pkg.Version == version {
-			return pkg, nil
-		}
-	}
-	return nil, fmt.Errorf("%w: %s", ErrPackageNotFound, ref)
-}
-
-func ListPackages() ([]PackageSummary, error) {
-	catalog, err := loadCatalog()
-	if err != nil {
-		return nil, err
-	}
-	summaries := make([]PackageSummary, 0, len(catalog.Packages))
-	for _, pkg := range catalog.Packages {
-		summaries = append(summaries, PackageSummary{Name: pkg.Name, Version: pkg.Version})
-	}
-	sort.Slice(summaries, func(i, j int) bool {
-		if summaries[i].Name == summaries[j].Name {
-			return summaries[i].Version < summaries[j].Version
-		}
-		return summaries[i].Name < summaries[j].Name
-	})
-	return summaries, nil
-}
-
 func ResolvePackages(manifest *Manifest, options ResolveOptions) ([]ResolvedPackage, error) {
 	if manifest == nil {
 		return nil, errors.New("distribution manifest is nil")
@@ -224,13 +180,8 @@ func ResolvePackages(manifest *Manifest, options ResolveOptions) ([]ResolvedPack
 			}
 		}
 	}
-	for _, ref := range manifest.Packages {
-		pkg, err := LoadPackage(ref.Ref())
-		if err != nil {
-			cleanupBuildPlans()
-			return nil, fmt.Errorf("resolve package %s: %w", ref.Ref(), err)
-		}
-		item := ResolvedPackage{Package: *pkg, Image: pkg.Remote.Reference()}
+	for _, pkg := range manifest.Packages {
+		item := ResolvedPackage{Package: pkg, Image: pkg.Remote.Reference()}
 		if options.Mode == ResolveSource || options.Mode == ResolveHybrid {
 			plan, err := pkg.BuildPlanWithOptions(options)
 			if err != nil {
@@ -484,26 +435,4 @@ func (p Package) buildPlanForSource(source Source, sourceRoot string) BuildPlan 
 		Image:      p.Remote.Image,
 		Commands:   []BuildCommand{{Name: "sealos", Args: buildArgs, Dir: contextDir}},
 	}
-}
-
-func loadCatalog() (*packageCatalog, error) {
-	data, err := manifestFS.ReadFile(packageCatalogPath)
-	if err != nil {
-		return nil, fmt.Errorf("%w: %s", ErrPackageNotFound, packageCatalogPath)
-	}
-	catalog := &packageCatalog{}
-	if err := yaml.Unmarshal(data, catalog); err != nil {
-		return nil, fmt.Errorf("decode package catalog: %w", err)
-	}
-	seen := make(map[string]struct{}, len(catalog.Packages))
-	for _, pkg := range catalog.Packages {
-		if err := pkg.Validate(); err != nil {
-			return nil, fmt.Errorf("validate package %s: %w", pkg.Ref(), err)
-		}
-		if _, ok := seen[pkg.Ref()]; ok {
-			return nil, fmt.Errorf("duplicate package %s", pkg.Ref())
-		}
-		seen[pkg.Ref()] = struct{}{}
-	}
-	return catalog, nil
 }

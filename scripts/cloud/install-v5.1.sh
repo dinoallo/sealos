@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SEALOS_VERSION="${SEALOS_VERSION:-v5.1.2-rc5}"
-SEALOS_OSS_VERSION="${SEALOS_OSS_VERSION:-v5.1.2-rc5}"
+SEALOS_VERSION="${SEALOS_VERSION:-v5.1.2-rc6}"
+SEALOS_OSS_VERSION="${SEALOS_OSS_VERSION:-v5.1.2-rc6}"
 SEALOS_V2_PROXY="${SEALOS_V2_PROXY:-false}"
 
 timestamp() {

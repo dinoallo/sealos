@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"context"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
@@ -43,9 +44,10 @@ set ips to exec cmd:
 
 func newExecCmd() *cobra.Command {
 	var (
-		roles   []string
-		ips     []string
-		cluster *v2.Cluster
+		roles         []string
+		ips           []string
+		cluster       *v2.Cluster
+		captureOutput bool
 	)
 	var execCmd = &cobra.Command{
 		Use:     "exec",
@@ -54,6 +56,9 @@ func newExecCmd() *cobra.Command {
 		Args:    cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			targets := getTargets(cluster, ips, roles)
+			if captureOutput {
+				return runCommandOutput(cmd, cluster, targets, args)
+			}
 			return runCommand(cluster, targets, args)
 		},
 		PreRunE: func(cmd *cobra.Command, args []string) (err error) {
@@ -64,6 +69,7 @@ func newExecCmd() *cobra.Command {
 	execCmd.Flags().StringVarP(&clusterName, "cluster", "c", "default", "name of cluster to run commands")
 	execCmd.Flags().StringSliceVarP(&roles, "roles", "r", []string{}, "run command on nodes with role")
 	execCmd.Flags().StringSliceVar(&ips, "ips", []string{}, "run command on nodes with ip address")
+	execCmd.Flags().BoolVar(&captureOutput, "capture-output", false, "capture remote command output for callers")
 	return execCmd
 }
 
@@ -94,4 +100,22 @@ func runCommand(cluster *v2.Cluster, targets []string, args []string) error {
 		})
 	}
 	return eg.Wait()
+}
+
+func runCommandOutput(cmd *cobra.Command, cluster *v2.Cluster, targets []string, args []string) error {
+	execer, err := exec.New(ssh.NewCacheClientFromCluster(cluster, true))
+	if err != nil {
+		return err
+	}
+	command := strings.Join(args, " ")
+	for _, target := range targets {
+		output, err := execer.Cmd(target, command)
+		if err != nil {
+			return err
+		}
+		if _, err := cmd.OutOrStdout().Write(output); err != nil {
+			return err
+		}
+	}
+	return nil
 }

@@ -16,6 +16,8 @@ package install
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -27,17 +29,105 @@ import (
 	"strings"
 	"time"
 
+	"github.com/labring/sealos/pkg/constants"
 	"github.com/labring/sealos/pkg/distribution"
 )
 
 const (
-	DefaultDistribution = "cloud@v5.1.0"
-	DefaultRegistry     = "sealos.hub:5000"
-	DefaultRegistryPass = "passw0rd"
-	DefaultCloudPort    = 443
-	DefaultSSHPort      = 22
-	DefaultWaitTimeout  = 30 * time.Minute
+	DefaultDistribution         = "cloud-pro@v5.1.2-rc6"
+	DefaultRegistry             = "sealos.hub:5000"
+	DefaultRegistryPass         = "passw0rd"
+	DefaultCloudPort            = 443
+	DefaultSSHPort              = 22
+	DefaultServiceNodePortRange = "30000-50000"
+	DefaultCiliumVersion        = "v1.16.9"
+	DefaultWaitTimeout          = 30 * time.Minute
+	cloudRuntimeRoot            = "/root/.sealos/cloud"
 )
+
+const cloudRuntimeTools = `#!/usr/bin/env bash
+
+GLOBAL_VALUES_FILE="${SEALOS_GLOBAL_VALUES_FILE:-/root/.sealos/cloud/values/global.yaml}"
+
+read_yaml_file_path() {
+  local path="${1:-}"
+  if command -v yq >/dev/null 2>&1 && [ -f "${GLOBAL_VALUES_FILE}" ]; then
+    yq e -r "${path} // \"\"" "${GLOBAL_VALUES_FILE}" 2>/dev/null || true
+    return 0
+  fi
+
+  case "${path}" in
+    .global.cluster.podCIDR) awk -F: '/podCIDR:/ {gsub(/[ "\\047]/, "", $2); print $2; exit}' "${GLOBAL_VALUES_FILE}" ;;
+    .global.cluster.serviceNodePortRange) awk -F: '/serviceNodePortRange:/ {gsub(/[ "\\047]/, "", $2); print $2; exit}' "${GLOBAL_VALUES_FILE}" ;;
+    .global.network.cilium.maskSize) awk -F: '/maskSize:/ {gsub(/[ "\\047]/, "", $2); print $2; exit}' "${GLOBAL_VALUES_FILE}" ;;
+    .global.network.cilium.native) awk -F: '/native:/ {gsub(/[ "\\047]/, "", $2); print $2; exit}' "${GLOBAL_VALUES_FILE}" ;;
+    .global.os.isKylinV10) awk -F: '/isKylinV10:/ {gsub(/[ "\\047]/, "", $2); print $2; exit}' "${GLOBAL_VALUES_FILE}" ;;
+    *) printf '' ;;
+  esac
+}
+
+ensure_global_values_ready_for_component() {
+  if [ ! -s "${GLOBAL_VALUES_FILE}" ]; then
+    echo "global values file is missing: ${GLOBAL_VALUES_FILE}" >&2
+    return 1
+  fi
+}
+
+get_global_value() {
+  read_yaml_file_path "$@"
+}
+
+helm_default_values() {
+  return 0
+}
+
+bool_is_true() {
+  case "${1:-}" in
+    true|TRUE|yes|YES|y|Y|1|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+global_http_disable_https() {
+  bool_is_true "$(read_yaml_file_path '.global.http.disableHttps')"
+}
+
+global_http_scheme() {
+  if global_http_disable_https; then
+    printf 'http'
+  else
+    printf 'https'
+  fi
+}
+
+global_http_effective_port() {
+  if global_http_disable_https; then
+    read_yaml_file_path '.global.http.httpPort'
+  else
+    read_yaml_file_path '.global.http.httpsPort'
+  fi
+}
+
+global_http_port_suffix() {
+  local scheme="${1:-$(global_http_scheme)}"
+  local port="${2:-$(global_http_effective_port)}"
+  if [ "${scheme}" = "http" ] && [ "${port}" = "80" ]; then
+    return 0
+  fi
+  if [ "${scheme}" = "https" ] && [ "${port}" = "443" ]; then
+    return 0
+  fi
+  printf ':%s' "${port}"
+}
+
+global_http_external_url() {
+  local host="${1:-}"
+  local path="${2:-}"
+  local scheme="$(global_http_scheme)"
+  local port="$(global_http_effective_port)"
+  printf '%s://%s%s%s' "${scheme}" "${host}" "$(global_http_port_suffix "${scheme}" "${port}")" "${path}"
+}
+`
 
 // Config contains the inputs required by the Sealos Cloud installer.
 type Config struct {
@@ -63,6 +153,7 @@ type Config struct {
 	PodCIDR              string
 	ServiceCIDR          string
 	ServiceNodePortRange string
+	CiliumVersion        string
 	CiliumMaskSize       string
 
 	CertPath    string
@@ -97,7 +188,8 @@ func DefaultConfig() Config {
 		ContainerdStorage:    "/var/lib/containerd",
 		PodCIDR:              "100.64.0.0/10",
 		ServiceCIDR:          "10.96.0.0/22",
-		ServiceNodePortRange: "30000-50000",
+		ServiceNodePortRange: DefaultServiceNodePortRange,
+		CiliumVersion:        DefaultCiliumVersion,
 		CiliumMaskSize:       "24",
 		ConfigDir:            filepath.Join(home, ".sealos", "cloud"),
 		WaitTimeout:          DefaultWaitTimeout,
@@ -168,6 +260,7 @@ func ConfigFromEnv(lookup func(string) (string, bool)) Config {
 	setString("SEALOS_V2_POD_CIDR", &cfg.PodCIDR)
 	setString("SEALOS_V2_SERVICE_CIDR", &cfg.ServiceCIDR)
 	setString("SEALOS_V2_SERVICE_NODEPORT_RANGE", &cfg.ServiceNodePortRange)
+	setString("SEALOS_V2_CILIUM_VERSION", &cfg.CiliumVersion)
 	setString("SEALOS_V2_CILIUM_MASKSIZE", &cfg.CiliumMaskSize)
 	setString("SEALOS_V2_CERT_PATH", &cfg.CertPath)
 	setString("SEALOS_V2_KEY_PATH", &cfg.KeyPath)
@@ -192,6 +285,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.CloudDomain) == "" {
 		return errors.New("cloud domain is required")
+	}
+	if err := validateServiceNodePortRange(c.ServiceNodePortRange); err != nil {
+		return err
 	}
 	if c.SSHPort == 0 {
 		return errors.New("ssh port must be greater than zero")
@@ -266,11 +362,32 @@ type Images struct {
 	CloudLicenseFrontend           string
 	CloudDatabaseService           string
 	CloudLaunchpadService          string
+	CloudAdmissionWebhook          string
+	CloudNodeController            string
+	CloudVlogsService              string
 }
 
 func ResolveImages(manifest *distribution.Manifest) (Images, error) {
 	images, _, err := ResolveImagesWithOptions(manifest, distribution.ResolveOptions{Mode: distribution.ResolveRemote})
 	return images, err
+}
+
+// ValidateManifest checks whether the installer can consume a distribution.
+// The cloud distribution uses the fixed image mapping below; other
+// distributions use the bootstrap path and only need Kubernetes and Cilium.
+func ValidateManifest(manifest *distribution.Manifest, options distribution.ResolveOptions) error {
+	if manifest == nil {
+		return errors.New("distribution manifest is nil")
+	}
+	if manifest.Name == "cloud" {
+		_, _, err := ResolveImagesWithOptions(manifest, options)
+		return err
+	}
+	if _, err := distribution.ResolvePackages(manifest, options); err != nil {
+		return err
+	}
+	_, err := bootstrapPackages(manifest)
+	return err
 }
 
 func ResolveImagesWithOptions(manifest *distribution.Manifest, options distribution.ResolveOptions) (Images, []distribution.BuildPlan, error) {
@@ -340,6 +457,34 @@ func ResolveImagesWithOptions(manifest *distribution.Manifest, options distribut
 		}
 	}
 	return images, plans, nil
+}
+
+func bootstrapPackages(manifest *distribution.Manifest) ([]distribution.Package, error) {
+	if manifest == nil {
+		return nil, errors.New("distribution manifest is nil")
+	}
+	if len(manifest.Packages) == 0 {
+		if len(manifest.Images) < 2 {
+			return nil, fmt.Errorf("distribution %s requires Kubernetes and Cilium images", manifest.Ref())
+		}
+		return []distribution.Package{
+			{Name: "kubernetes", Version: "legacy", Remote: distribution.Remote{Image: manifest.Images[0]}},
+			{Name: "cilium", Version: "legacy", Remote: distribution.Remote{Image: manifest.Images[1]}},
+		}, nil
+	}
+
+	selected := make([]distribution.Package, 0, 2)
+	seen := map[string]bool{}
+	for _, pkg := range manifest.Packages {
+		if (pkg.Name == "kubernetes" || pkg.Name == "cilium") && !seen[pkg.Name] {
+			selected = append(selected, pkg)
+			seen[pkg.Name] = true
+		}
+	}
+	if !seen["kubernetes"] || !seen["cilium"] {
+		return nil, fmt.Errorf("distribution %s requires packages named kubernetes and cilium", manifest.Ref())
+	}
+	return selected, nil
 }
 
 func (i Images) RewriteProxy() Images {
@@ -473,9 +618,18 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	if err := i.Config.Validate(); err != nil {
 		return err
 	}
+	if i.Runner == nil {
+		return errors.New("installer command runner is nil")
+	}
+	if i.Stdout == nil {
+		i.Stdout = io.Discard
+	}
 	workDir := i.Config.ConfigDir
 	if _, err := os.Stat(workDir); errors.Is(err, os.ErrNotExist) {
 		workDir = os.TempDir()
+	}
+	if manifest != nil && manifest.Name != "cloud" {
+		return i.installBootstrap(ctx, manifest, workDir)
 	}
 	images, buildPlans, err := ResolveImagesWithOptions(manifest, distribution.ResolveOptions{
 		Mode:        i.Config.PackageMode,
@@ -485,12 +639,6 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	})
 	if err != nil {
 		return err
-	}
-	if i.Runner == nil {
-		return errors.New("installer command runner is nil")
-	}
-	if i.Stdout == nil {
-		i.Stdout = io.Discard
 	}
 	if !i.Config.DryRun {
 		if err := os.MkdirAll(i.Config.ConfigDir, 0o700); err != nil {
@@ -526,7 +674,13 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 			return err
 		}
 	}
-	if err := i.run(ctx, Command{Name: "sealos", Args: []string{"run", images.Helm}}); err != nil {
+	if err := i.ensureServiceNodePortRange(ctx); err != nil {
+		return err
+	}
+	if err := i.run(ctx, i.runImage(images.Helm)); err != nil {
+		return err
+	}
+	if err := i.prepareCloudRuntimeConfig(ctx); err != nil {
 		return err
 	}
 	if !ready {
@@ -540,13 +694,13 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 		}
 	}
 	for _, command := range []Command{
-		{Name: "sealos", Args: []string{"run", images.CertManager}},
+		i.runImage(images.CertManager),
 		i.imageWithEnv(images.OpenEBS, "OPENEBS_STORAGE_PREFIX", i.Config.OpenEBSStorage),
-		{Name: "sealos", Args: []string{"run", images.MetricsServer}},
-		{Name: "sealos", Args: []string{"run", images.Cockroach}},
-		{Name: "sealos", Args: []string{"run", images.VictoriaMetricsKubernetesStack}},
+		i.runImage(images.MetricsServer),
+		i.runImage(images.Cockroach),
+		i.runImage(images.VictoriaMetricsKubernetesStack),
 		i.imageWithEnvs(images.Higress, map[string]string{"SEALOS_CLOUD_PORT": strconv.Itoa(int(i.Config.CloudPort)), "SEALOS_CLOUD_DOMAIN": i.Config.CloudDomain}),
-		{Name: "sealos", Args: []string{"run", images.KubeBlocks}},
+		i.runImage(images.KubeBlocks),
 	} {
 		if err := i.run(ctx, command); err != nil {
 			return err
@@ -581,7 +735,331 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	if err := i.runCloud(ctx, images, cloudConfig); err != nil {
 		return err
 	}
-	return i.run(ctx, Command{Name: "sealos", Args: []string{"run", images.Finish}})
+	return i.run(ctx, i.runImage(images.Finish))
+}
+
+func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution.Manifest, workDir string) error {
+	resolved, err := distribution.ResolvePackages(manifest, distribution.ResolveOptions{
+		Mode:        i.Config.PackageMode,
+		SourceRoot:  i.Config.SourceRoot,
+		SourceCache: i.Config.SourceCache,
+		WorkDir:     workDir,
+	})
+	if err != nil {
+		return err
+	}
+	buildPlans := make([]distribution.BuildPlan, 0, len(resolved))
+	images := make(map[string]string, len(resolved))
+	for _, item := range resolved {
+		if item.Package.Name == "cilium" {
+			continue
+		}
+		if item.Build != nil {
+			buildPlans = append(buildPlans, *item.Build)
+		}
+		if _, exists := images[item.Package.Name]; exists {
+			return fmt.Errorf("distribution %s contains duplicate package name %q", manifest.Ref(), item.Package.Name)
+		}
+		images[item.Package.Name] = item.Image
+	}
+	kubernetesImage := images["kubernetes"]
+	cilium, err := selectCiliumPackage(resolved, i.Config.CiliumVersion)
+	if kubernetesImage == "" || err != nil {
+		if err != nil {
+			return fmt.Errorf("resolve Cilium package for distribution %s: %w", manifest.Ref(), err)
+		}
+		return fmt.Errorf("distribution %s could not resolve Kubernetes and Cilium images", manifest.Ref())
+	}
+	ciliumImage := cilium.Image
+	if cilium.Build != nil {
+		buildPlans = append(buildPlans, *cilium.Build)
+	}
+	for _, plan := range buildPlans {
+		if plan.CleanupDir != "" {
+			defer os.RemoveAll(plan.CleanupDir)
+		}
+		for _, command := range plan.Commands {
+			if err := i.run(ctx, Command{Name: command.Name, Args: command.Args, Dir: command.Dir}); err != nil {
+				return err
+			}
+		}
+	}
+
+	installed, ready := i.clusterStatus(ctx)
+	i.info("Starting distribution bootstrap for %s", manifest.Ref())
+	i.info("Kubernetes installed=%t ready=%t", installed, ready)
+	if !installed {
+		if err := i.pullImage(ctx, kubernetesImage, ""); err != nil {
+			return err
+		}
+		if err := i.run(ctx, i.kubernetesCommand(kubernetesImage)); err != nil {
+			return err
+		}
+		i.cleanupImage(ctx, kubernetesImage)
+	}
+	if err := i.ensureServiceNodePortRange(ctx); err != nil {
+		return err
+	}
+	if err := i.prepareCloudRuntimeConfig(ctx); err != nil {
+		return err
+	}
+	if !ready {
+		if err := i.pullImage(ctx, ciliumImage, ""); err != nil {
+			return err
+		}
+		if err := i.run(ctx, i.ciliumCommand(ciliumImage)); err != nil {
+			return err
+		}
+		i.cleanupImage(ctx, ciliumImage)
+		if !i.Config.DryRun {
+			if err := i.waitClusterReady(ctx); err != nil {
+				return err
+			}
+		}
+	}
+	for _, item := range resolved {
+		if item.Package.Name != "cilium" || item.Image == ciliumImage {
+			continue
+		}
+		if err := i.pullImage(ctx, item.Image, ""); err != nil {
+			return err
+		}
+		i.cleanupImage(ctx, item.Image)
+	}
+	if err := i.ensurePlatformNamespaces(ctx); err != nil {
+		return err
+	}
+	if err := i.installDistributionPackages(ctx, images); err != nil {
+		return err
+	}
+	i.info("Distribution installation completed with all packages processed")
+	return nil
+}
+
+func (i *Installer) prepareCloudRuntimeConfig(ctx context.Context) error {
+	if i.Config.DryRun {
+		return nil
+	}
+	if err := i.run(ctx, i.cloudRuntimeConfigCommand()); err != nil {
+		return fmt.Errorf("prepare cloud runtime configuration: %w", err)
+	}
+	return nil
+}
+
+func (i *Installer) cloudRuntimeConfigCommand() Command {
+	tools := base64.StdEncoding.EncodeToString(i.cloudRuntimeToolsContent())
+	values := base64.StdEncoding.EncodeToString([]byte(i.cloudRuntimeValues()))
+	script := fmt.Sprintf(`set -eu
+root=%s
+tools_tmp=$(mktemp)
+values_tmp=$(mktemp)
+trap 'rm -f "$tools_tmp" "$values_tmp"' EXIT
+mkdir -p "$root/scripts" "$root/values" "$root/bin"
+printf '%%s' '%s' | base64 -d > "$tools_tmp"
+printf '%%s' '%s' | base64 -d > "$values_tmp"
+chmod 0755 "$tools_tmp"
+chmod 0644 "$values_tmp"
+mv "$tools_tmp" "$root/scripts/tools.sh"
+mv "$values_tmp" "$root/values/global.yaml"
+if [ ! -x "$root/bin/yq" ] && command -v yq >/dev/null 2>&1; then
+  ln -s "$(command -v yq)" "$root/bin/yq"
+fi`, shellQuote(cloudRuntimeRoot), tools, values)
+	return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", script}}
+}
+
+func (i *Installer) cloudRuntimeToolsContent() []byte {
+	candidates := make([]string, 0, 2)
+	if strings.TrimSpace(i.Config.ConfigDir) != "" {
+		candidates = append(candidates, filepath.Join(i.Config.ConfigDir, "scripts", "tools.sh"))
+	}
+	candidates = append(candidates, filepath.Join(cloudRuntimeRoot, "scripts", "tools.sh"))
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err == nil && len(data) > 0 {
+			return data
+		}
+	}
+	return []byte(cloudRuntimeTools)
+}
+
+func (i *Installer) cloudRuntimeValues() string {
+	return fmt.Sprintf(`global:
+  http:
+    domain: %s
+    httpsPort: %d
+    httpPort: 80
+    disableHttps: false
+  cluster:
+    podCIDR: %s
+    serviceCIDR: %s
+    serviceNodePortRange: %s
+    maxPods: %d
+  network:
+    cilium:
+      version: %s
+      maskSize: %s
+      native: false
+  os:
+    isKylinV10: false
+`, yamlString(i.Config.CloudDomain), i.Config.CloudPort, yamlString(i.Config.PodCIDR), yamlString(i.Config.ServiceCIDR), yamlString(i.Config.ServiceNodePortRange), i.Config.MaxPods, yamlString(i.Config.CiliumVersion), yamlString(i.Config.CiliumMaskSize))
+}
+
+func yamlString(value string) string {
+	return strconv.Quote(value)
+}
+
+func selectCiliumImage(resolved []distribution.ResolvedPackage, version string) (string, error) {
+	item, err := selectCiliumPackage(resolved, version)
+	if err != nil {
+		return "", err
+	}
+	return item.Image, nil
+}
+
+func selectCiliumPackage(resolved []distribution.ResolvedPackage, version string) (distribution.ResolvedPackage, error) {
+	version = strings.TrimSpace(version)
+	available := make([]string, 0)
+	for _, item := range resolved {
+		if item.Package.Name != "cilium" {
+			continue
+		}
+		available = append(available, item.Package.Version)
+		if version == "" || item.Package.Version == version {
+			return item, nil
+		}
+	}
+	if version == "" {
+		return distribution.ResolvedPackage{}, errors.New("package is missing")
+	}
+	if len(available) == 0 {
+		return distribution.ResolvedPackage{}, fmt.Errorf("package is missing (requested version %q)", version)
+	}
+	return distribution.ResolvedPackage{}, fmt.Errorf("version %q is unavailable (available: %s)", version, strings.Join(available, ", "))
+}
+
+func (i *Installer) installDistributionPackages(ctx context.Context, images map[string]string) error {
+	if images["sealos-cloud-desktop-frontend"] != "" {
+		for _, name := range []string{
+			"sealos-cloud-desktop-frontend",
+			"sealos-cloud-user-controller",
+			"sealos-cloud-terminal-controller",
+			"sealos-cloud-app-controller",
+			"sealos-cloud-resources-controller",
+			"sealos-cloud-account-controller",
+			"sealos-cloud-account-service",
+			"sealos-cloud-license-controller",
+			"sealos-cloud-job-init-controller",
+			"sealos-cloud-job-heartbeat-controller",
+			"sealos-cloud-applaunchpad-frontend",
+			"sealos-cloud-terminal-frontend",
+			"sealos-cloud-dbprovider-frontend",
+			"sealos-cloud-costcenter-frontend",
+			"sealos-cloud-template-frontend",
+			"sealos-cloud-license-frontend",
+			"sealos-cloud-database-service",
+			"sealos-cloud-launchpad-service",
+			"sealos-cloud-admission-webhook",
+			"sealos-cloud-node-controller",
+			"sealos-cloud-vlogs-service",
+		} {
+			if strings.TrimSpace(images[name]) == "" {
+				return fmt.Errorf("distribution is missing Cloud package %q", name)
+			}
+		}
+	}
+
+	for _, name := range []string{"cert-manager", "openebs", "higress", "victoria-metrics-k8s-stack", "kubeblocks", "sealos-oss", "sealos-minio", "vlogs", "sealos-offline", "dnsmasq", "devbox"} {
+		if image := images[name]; image != "" {
+			command := i.runImage(image)
+			if name == "sealos-oss" {
+				command = i.imageWithEnv(image, "SEALOS_V2_SERVICE_NODEPORT_RANGE", i.Config.ServiceNodePortRange)
+			}
+			if err := i.runPackage(ctx, command); err != nil {
+				return err
+			}
+			if name == "sealos-oss" {
+				if err := i.waitForConfigMap(ctx, "sealos-config", "sealos-system"); err != nil {
+					return err
+				}
+			}
+		}
+	}
+
+	if images["sealos-cloud-desktop-frontend"] == "" {
+		return nil
+	}
+	cloudImages := Images{
+		CloudDesktopFrontend:        images["sealos-cloud-desktop-frontend"],
+		CloudUserController:         images["sealos-cloud-user-controller"],
+		CloudTerminalController:     images["sealos-cloud-terminal-controller"],
+		CloudAppController:          images["sealos-cloud-app-controller"],
+		CloudResourcesController:    images["sealos-cloud-resources-controller"],
+		CloudAccountController:      images["sealos-cloud-account-controller"],
+		CloudAccountService:         images["sealos-cloud-account-service"],
+		CloudLicenseController:      images["sealos-cloud-license-controller"],
+		CloudJobInitController:      images["sealos-cloud-job-init-controller"],
+		CloudJobHeartbeatController: images["sealos-cloud-job-heartbeat-controller"],
+		CloudApplaunchpadFrontend:   images["sealos-cloud-applaunchpad-frontend"],
+		CloudTerminalFrontend:       images["sealos-cloud-terminal-frontend"],
+		CloudDBProviderFrontend:     images["sealos-cloud-dbprovider-frontend"],
+		CloudCostCenterFrontend:     images["sealos-cloud-costcenter-frontend"],
+		CloudTemplateFrontend:       images["sealos-cloud-template-frontend"],
+		CloudLicenseFrontend:        images["sealos-cloud-license-frontend"],
+		CloudDatabaseService:        images["sealos-cloud-database-service"],
+		CloudLaunchpadService:       images["sealos-cloud-launchpad-service"],
+		CloudAdmissionWebhook:       images["sealos-cloud-admission-webhook"],
+		CloudNodeController:         images["sealos-cloud-node-controller"],
+		CloudVlogsService:           images["sealos-cloud-vlogs-service"],
+	}
+	config, err := i.cloudConfig(ctx)
+	if err != nil {
+		return err
+	}
+	if err := i.runCloudWithOptions(ctx, cloudImages, config, false); err != nil {
+		return err
+	}
+
+	commands := []Command{}
+	if cloudImages.CloudResourcesController != "" {
+		resourceEnv := map[string]string{
+			"MONGO_URI":         config.DatabaseMongo,
+			"DEFAULT_NAMESPACE": "resources-system",
+		}
+		if !i.Config.DryRun {
+			accessKey, secretKey, err := i.objectStorageCredentials(ctx)
+			if err != nil {
+				return err
+			}
+			resourceEnv["MINIO_AK"] = accessKey
+			resourceEnv["MINIO_SK"] = secretKey
+		}
+		commands = append(commands, i.imageWithEnvs(cloudImages.CloudResourcesController, resourceEnv))
+	}
+	commands = append(commands,
+		i.imageWithEnvs(cloudImages.CloudAdmissionWebhook, map[string]string{"cnameDomains": i.Config.CloudDomain, "cnameCheck": "false"}),
+		i.runImage(cloudImages.CloudNodeController),
+		i.imageWithEnvs(cloudImages.CloudAccountController, map[string]string{
+			"MONGO_URI":              config.DatabaseMongo,
+			"TRAFFIC_MONGO_URI":      config.DatabaseMongo,
+			"cloudDomain":            config.CloudDomain,
+			"cloudPort":              config.CloudPort,
+			"DEFAULT_NAMESPACE":      "account-system",
+			"GLOBAL_COCKROACH_URI":   config.DatabaseGlobalCockroach,
+			"LOCAL_COCKROACH_URI":    config.DatabaseLocalCockroach,
+			"LOCAL_REGION":           config.RegionUID,
+			"ACCOUNT_API_JWT_SECRET": config.JWTInternal,
+		}),
+		i.runImage(cloudImages.CloudVlogsService),
+	)
+	for _, command := range commands {
+		if commandImage(command) == "" {
+			continue
+		}
+		if err := i.runPackage(ctx, command); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (i *Installer) run(ctx context.Context, command Command) error {
@@ -599,6 +1077,48 @@ func (i *Installer) run(ctx context.Context, command Command) error {
 	return nil
 }
 
+func (i *Installer) pullImage(ctx context.Context, image, policy string) error {
+	if strings.TrimSpace(image) == "" {
+		return errors.New("image reference is required")
+	}
+	args := []string{"pull", "-q", image}
+	if policy != "" {
+		args = []string{"pull", "--policy=" + policy, "-q", image}
+	}
+	return i.run(ctx, Command{Name: "sealos", Args: args})
+}
+
+func commandImage(command Command) string {
+	if command.Name != "sealos" || len(command.Args) < 3 || command.Args[0] != "run" {
+		return ""
+	}
+	return strings.TrimSpace(command.Args[2])
+}
+
+func (i *Installer) runPackage(ctx context.Context, command Command) error {
+	image := commandImage(command)
+	if image == "" {
+		return nil
+	}
+	if err := i.pullImage(ctx, image, ""); err != nil {
+		return err
+	}
+	if err := i.run(ctx, command); err != nil {
+		return err
+	}
+	i.cleanupImage(ctx, image)
+	return nil
+}
+
+func (i *Installer) cleanupImage(ctx context.Context, image string) {
+	if i.Config.DryRun || strings.TrimSpace(image) == "" {
+		return
+	}
+	if err := i.run(ctx, Command{Name: "sealos", Args: []string{"rmi", "--force", image}}); err != nil {
+		i.info("Unable to remove local package image %s: %v", image, err)
+	}
+}
+
 func (i *Installer) info(format string, args ...interface{}) {
 	_, _ = fmt.Fprintf(i.Stdout, "[sealos install] "+format+"\n", args...)
 }
@@ -607,11 +1127,11 @@ func (i *Installer) clusterStatus(ctx context.Context) (bool, bool) {
 	if i.Config.DryRun {
 		return false, false
 	}
-	output, err := i.Runner.Output(ctx, Command{Name: "kubectl", Args: []string{"get", "nodes", "--no-headers"}})
+	output, err := i.Runner.Output(ctx, i.clusterStatusCommand())
 	if err != nil {
 		return false, false
 	}
-	return true, !strings.Contains(string(output), "NotReady")
+	return true, nodesReady(output)
 }
 
 func (i *Installer) waitClusterReady(ctx context.Context) error {
@@ -620,8 +1140,8 @@ func (i *Installer) waitClusterReady(ctx context.Context) error {
 	ticker := time.NewTicker(3 * time.Second)
 	defer ticker.Stop()
 	for {
-		output, err := i.Runner.Output(ctx, Command{Name: "kubectl", Args: []string{"get", "nodes", "--no-headers"}})
-		if err == nil && !strings.Contains(string(output), "NotReady") {
+		output, err := i.Runner.Output(ctx, i.clusterStatusCommand())
+		if err == nil && nodesReady(output) {
 			return nil
 		}
 		select {
@@ -634,8 +1154,41 @@ func (i *Installer) waitClusterReady(ctx context.Context) error {
 	}
 }
 
+func (i *Installer) clusterStatusCommand() Command {
+	if strings.TrimSpace(i.Config.Masters) != "" {
+		return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", "--capture-output", "kubectl get nodes --no-headers"}}
+	}
+	kubeconfig := constants.NewPathResolver("default").AdminFile()
+	return Command{Name: "kubectl", Args: []string{"--kubeconfig", kubeconfig, "get", "nodes", "--no-headers"}}
+}
+
+func (i *Installer) kubectlCommand(args ...string) Command {
+	if strings.TrimSpace(i.Config.Masters) == "" {
+		return Command{Name: "kubectl", Args: args}
+	}
+	parts := make([]string, 0, len(args)+1)
+	parts = append(parts, "kubectl")
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", "--capture-output", strings.Join(parts, " ")}}
+}
+
+func nodesReady(output []byte) bool {
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) == 0 || lines[0] == "" {
+		return false
+	}
+	for _, line := range lines {
+		if strings.TrimSpace(line) == "" || strings.Contains(line, "NotReady") {
+			return false
+		}
+	}
+	return true
+}
+
 func (i *Installer) kubernetesCommand(image string) Command {
-	args := []string{"run", image}
+	args := []string{"run", "--force", image}
 	appendArg := func(name, value string) {
 		if value != "" {
 			args = append(args, name, value)
@@ -657,6 +1210,106 @@ func (i *Installer) kubernetesCommand(image string) Command {
 	return Command{Name: "sealos", Args: args}
 }
 
+func validateServiceNodePortRange(value string) error {
+	parts := strings.Split(strings.TrimSpace(value), "-")
+	if len(parts) != 2 {
+		return fmt.Errorf("service NodePort range must be in the form START-END: %q", value)
+	}
+	start, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return fmt.Errorf("service NodePort range has an invalid start port: %q", value)
+	}
+	end, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return fmt.Errorf("service NodePort range has an invalid end port: %q", value)
+	}
+	if start < 1 || end > 65535 || start > end {
+		return fmt.Errorf("service NodePort range must be within 1-65535 and ordered: %q", value)
+	}
+	return nil
+}
+
+func (i *Installer) ensureServiceNodePortRange(ctx context.Context) error {
+	if i.Config.DryRun {
+		return nil
+	}
+	if err := validateServiceNodePortRange(i.Config.ServiceNodePortRange); err != nil {
+		return err
+	}
+	if err := i.run(ctx, i.serviceNodePortRangeCommand()); err != nil {
+		return fmt.Errorf("configure Kubernetes service NodePort range: %w", err)
+	}
+	if err := i.waitForAPIServer(ctx); err != nil {
+		return fmt.Errorf("wait for Kubernetes API Server after NodePort range change: %w", err)
+	}
+	return nil
+}
+
+func (i *Installer) serviceNodePortRangeCommand() Command {
+	value := i.Config.ServiceNodePortRange
+	script := fmt.Sprintf(`set -eu
+manifest=/etc/kubernetes/manifests/kube-apiserver.yaml
+node_port_range=%q
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+if [ ! -f "$manifest" ]; then
+  echo "kube-apiserver manifest not found: $manifest" >&2
+  exit 1
+fi
+annotation="sealos.io/service-node-port-range: \"${node_port_range}\""
+if grep -Eq "^[[:space:]]*- --service-node-port-range=${node_port_range}$" "$manifest" && \
+   grep -Fq "$annotation" "$manifest"; then
+  exit 0
+fi
+if grep -q -- '--service-node-port-range=' "$manifest"; then
+  awk -v node_port_range="$node_port_range" '
+    $0 ~ /^[[:space:]]*- --service-node-port-range=/ {
+      sub(/=.*/, "=" node_port_range)
+    }
+    { print }
+  ' "$manifest" > "$tmp"
+else
+  awk -v node_port_range="$node_port_range" '
+    { print }
+    /--service-cluster-ip-range=/ {
+      print "    - --service-node-port-range=" node_port_range
+    }
+  ' "$manifest" > "$tmp"
+fi
+cp "$tmp" "$manifest"
+if ! grep -q '^  annotations:' "$manifest"; then
+	awk '
+	  { print }
+	  /^metadata:/ { print "  annotations:" }
+	' "$manifest" > "$tmp"
+	cp "$tmp" "$manifest"
+fi
+if grep -q -- 'sealos.io/service-node-port-range:' "$manifest"; then
+	awk -v node_port_range="$node_port_range" '
+	  $0 ~ /^[[:space:]]*sealos.io\/service-node-port-range:/ {
+	    sub(/:.*/, ": \"" node_port_range "\"")
+	  }
+	  { print }
+	' "$manifest" > "$tmp"
+else
+	awk -v node_port_range="$node_port_range" '
+	  { print }
+	  /^  annotations:/ {
+	    print "    sealos.io/service-node-port-range: \"" node_port_range "\""
+	  }
+	' "$manifest" > "$tmp"
+fi
+cp "$tmp" "$manifest"`, value)
+	return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", script}}
+}
+
+func (i *Installer) waitForAPIServer(ctx context.Context) error {
+	return i.waitUntil(ctx, func() (bool, error) {
+		_, err := i.Runner.Output(ctx, i.kubectlCommand("get", "--raw=/readyz"))
+		return err == nil, nil
+	})
+}
+
 func (i *Installer) ciliumCommand(image string) Command {
 	return i.imageWithEnvs(image, map[string]string{
 		"KUBEADM_POD_SUBNET":    i.Config.PodCIDR,
@@ -670,7 +1323,7 @@ func (i *Installer) imageWithEnv(image, key, value string) Command {
 }
 
 func (i *Installer) imageWithEnvs(image string, env map[string]string) Command {
-	args := []string{"run", image}
+	args := []string{"run", "--force", image}
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -680,6 +1333,10 @@ func (i *Installer) imageWithEnvs(image string, env map[string]string) Command {
 		args = append(args, "--env", key+"="+env[key])
 	}
 	return Command{Name: "sealos", Args: args}
+}
+
+func (i *Installer) runImage(image string) Command {
+	return Command{Name: "sealos", Args: []string{"run", "--force", image}}
 }
 
 type cloudConfig struct {
@@ -705,6 +1362,21 @@ func (i *Installer) cloudConfig(ctx context.Context) (cloudConfig, error) {
 	if i.Config.DryRun {
 		return config, nil
 	}
+	data, err := i.requiredResourceData(ctx, "configmap", "sealos-config", "sealos-system", []string{
+		"cloudDomain",
+		"cloudPort",
+		"regionUID",
+		"databaseGlobalCockroachdbURI",
+		"databaseLocalCockroachdbURI",
+		"databaseMongodbURI",
+		"passwordSalt",
+		"jwtInternal",
+		"jwtRegional",
+		"jwtGlobal",
+	})
+	if err != nil {
+		return cloudConfig{}, fmt.Errorf("read sealos-config: %w", err)
+	}
 	values := map[string]*string{
 		"cloudDomain":                  &config.CloudDomain,
 		"cloudPort":                    &config.CloudPort,
@@ -718,39 +1390,174 @@ func (i *Installer) cloudConfig(ctx context.Context) (cloudConfig, error) {
 		"jwtGlobal":                    &config.JWTGlobal,
 	}
 	for key, target := range values {
-		value, err := i.kubectlValue(ctx, "configmap", "sealos-config", "-n", "sealos-system", "-o", "jsonpath={.data."+key+"}")
-		if err != nil {
-			return cloudConfig{}, fmt.Errorf("read sealos-config %s: %w", key, err)
-		}
-		*target = value
+		*target = data[key]
 	}
-	value, err := i.kubectlValue(ctx, "configmap", "cert-config", "-n", "sealos-system", "-o", "jsonpath={.data.CERT_MODE}")
-	if err != nil {
-		return cloudConfig{}, fmt.Errorf("read cert-config: %w", err)
+	value, err := i.kubectlValue(ctx, "get", "configmap", "cert-config", "-n", "sealos-system", "-o", "jsonpath={.data.CERT_MODE}")
+	if err == nil {
+		config.TLSRejectUnauthorized = value == "self-signed"
 	}
-	config.TLSRejectUnauthorized = value == "self-signed"
 	return config, nil
 }
 
+func (i *Installer) requiredResourceData(ctx context.Context, resource, name, namespace string, required []string) (map[string]string, error) {
+	timeout := 2 * time.Minute
+	if i.Config.WaitTimeout > 0 && i.Config.WaitTimeout < timeout {
+		timeout = i.Config.WaitTimeout
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		output, err := i.kubectlValue(ctx, "get", resource, name, "-n", namespace, "-o", "json")
+		if err == nil {
+			var object struct {
+				Data map[string]string `json:"data"`
+			}
+			if decodeErr := json.Unmarshal([]byte(output), &object); decodeErr != nil {
+				lastErr = fmt.Errorf("decode %s: %w", resource, decodeErr)
+			} else {
+				missing := make([]string, 0)
+				for _, key := range required {
+					if strings.TrimSpace(object.Data[key]) == "" {
+						missing = append(missing, key)
+					}
+				}
+				if len(missing) == 0 {
+					return object.Data, nil
+				}
+				lastErr = fmt.Errorf("missing fields: %s", strings.Join(missing, ", "))
+			}
+		} else {
+			lastErr = err
+		}
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-deadline.C:
+			return nil, fmt.Errorf("timed out waiting for value: %w", lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (i *Installer) objectStorageCredentials(ctx context.Context) (string, string, error) {
+	type credentialSource struct {
+		name      string
+		accessKey string
+		secretKey string
+	}
+	sources := []credentialSource{
+		{name: "object-storage-secret", accessKey: "accesskey", secretKey: "secretkey"},
+		{name: "object-storage-user-0", accessKey: "CONSOLE_ACCESS_KEY", secretKey: "CONSOLE_SECRET_KEY"},
+	}
+
+	timeout := 2 * time.Minute
+	if i.Config.WaitTimeout > 0 && i.Config.WaitTimeout < timeout {
+		timeout = i.Config.WaitTimeout
+	}
+	deadline := time.NewTimer(timeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	var lastErr error
+	for {
+		for _, source := range sources {
+			data, err := i.secretData(ctx, source.name, "objectstorage-system")
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			accessKey, err := base64.StdEncoding.DecodeString(data[source.accessKey])
+			if err != nil {
+				lastErr = fmt.Errorf("decode object storage access key from %s: %w", source.name, err)
+				continue
+			}
+			if len(accessKey) == 0 {
+				lastErr = fmt.Errorf("object storage access key from %s is empty", source.name)
+				continue
+			}
+			secretKey, err := base64.StdEncoding.DecodeString(data[source.secretKey])
+			if err != nil {
+				lastErr = fmt.Errorf("decode object storage secret key from %s: %w", source.name, err)
+				continue
+			}
+			if len(secretKey) == 0 {
+				lastErr = fmt.Errorf("object storage secret key from %s is empty", source.name)
+				continue
+			}
+			return string(accessKey), string(secretKey), nil
+		}
+
+		select {
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		case <-deadline.C:
+			if lastErr == nil {
+				lastErr = errors.New("no valid object storage credential source found")
+			}
+			return "", "", fmt.Errorf("read object storage credentials: %w", lastErr)
+		case <-ticker.C:
+		}
+	}
+}
+
+func (i *Installer) secretData(ctx context.Context, name, namespace string) (map[string]string, error) {
+	output, err := i.kubectlValue(ctx, "get", "secret", name, "-n", namespace, "-o", "json")
+	if err != nil {
+		return nil, err
+	}
+	var object struct {
+		Data map[string]string `json:"data"`
+	}
+	if err := json.Unmarshal([]byte(output), &object); err != nil {
+		return nil, fmt.Errorf("decode secret %s: %w", name, err)
+	}
+	return object.Data, nil
+}
+
 func (i *Installer) kubectlValue(ctx context.Context, args ...string) (string, error) {
-	output, err := i.Runner.Output(ctx, Command{Name: "kubectl", Args: args})
+	output, err := i.Runner.Output(ctx, i.kubectlCommand(args...))
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(string(output)), nil
 }
 
-func (i *Installer) runCloud(ctx context.Context, images Images, config cloudConfig) error {
-	if err := i.run(ctx, Command{Name: "sealos", Args: []string{"login", "-u", "admin", "-p", i.Config.RegistryPass, DefaultRegistry}}); err != nil {
-		return err
+func (i *Installer) ensurePlatformNamespaces(ctx context.Context) error {
+	if i.Config.DryRun {
+		return nil
 	}
-	for _, image := range []string{images.CloudDesktopFrontend, images.CloudUserController, images.CloudTerminalController, images.CloudAppController, images.CloudResourcesController, images.CloudAccountController, images.CloudAccountService, images.CloudLicenseController, images.CloudJobInitController, images.CloudJobHeartbeatController, images.CloudApplaunchpadFrontend, images.CloudTerminalFrontend, images.CloudDBProviderFrontend, images.CloudCostCenterFrontend, images.CloudTemplateFrontend, images.CloudLicenseFrontend, images.CloudDatabaseService, images.CloudLaunchpadService} {
-		if err := i.run(ctx, Command{Name: "sealos", Args: []string{"pull", "--policy=always", "-q", image}}); err != nil {
+	for _, namespace := range []string{"sealos", "sealos-system"} {
+		if _, err := i.Runner.Output(ctx, i.kubectlCommand("get", "namespace", namespace)); err == nil {
+			continue
+		}
+		if err := i.run(ctx, i.kubectlCommand("create", "namespace", namespace)); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
-	if err := i.run(ctx, i.imageWithEnvs(images.CloudDesktopFrontend, map[string]string{
+func (i *Installer) waitForConfigMap(ctx context.Context, name, namespace string) error {
+	if i.Config.DryRun {
+		return nil
+	}
+	return i.waitUntil(ctx, func() (bool, error) {
+		_, err := i.Runner.Output(ctx, i.kubectlCommand("get", "configmap", name, "-n", namespace))
+		return err == nil, nil
+	})
+}
+
+func (i *Installer) runCloud(ctx context.Context, images Images, config cloudConfig) error {
+	return i.runCloudWithOptions(ctx, images, config, true)
+}
+
+func (i *Installer) runCloudWithOptions(ctx context.Context, images Images, config cloudConfig, includeInfrastructure bool) error {
+	if err := i.runPackage(ctx, i.imageWithEnvs(images.CloudDesktopFrontend, map[string]string{
 		"cloudDomain": config.CloudDomain, "cloudPort": config.CloudPort, "certSecretName": "wildcard-cert",
 		"passwordEnabled": "true", "passwordSalt": config.PasswordSalt, "regionUID": config.RegionUID,
 		"databaseMongodbURI":           config.DatabaseMongo + "/sealos-auth?authSource=admin",
@@ -767,16 +1574,20 @@ func (i *Installer) runCloud(ctx context.Context, images Images, config cloudCon
 	commands := []Command{
 		i.imageWithEnvs(images.CloudUserController, map[string]string{"cloudDomain": config.CloudDomain, "apiserverPort": "6443"}),
 		i.imageWithEnvs(images.CloudTerminalController, map[string]string{"cloudDomain": config.CloudDomain, "cloudPort": config.CloudPort, "userNamespace": "user-system", "wildcardCertSecretName": "wildcard-cert", "wildcardCertSecretNamespace": "sealos-system"}),
-		{Name: "sealos", Args: []string{"run", images.CloudAppController}},
-		i.imageWithEnvs(images.CloudResourcesController, map[string]string{"MONGO_URI": config.DatabaseMongo, "DEFAULT_NAMESPACE": "resources-system"}),
-		i.imageWithEnvs(images.CloudAccountController, map[string]string{"MONGO_URI": config.DatabaseMongo, "TRAFFIC_MONGO_URI": config.DatabaseMongo, "cloudDomain": config.CloudDomain, "cloudPort": config.CloudPort, "DEFAULT_NAMESPACE": "account-system", "GLOBAL_COCKROACH_URI": config.DatabaseGlobalCockroach, "LOCAL_COCKROACH_URI": config.DatabaseLocalCockroach, "LOCAL_REGION": config.RegionUID, "ACCOUNT_API_JWT_SECRET": config.JWTInternal}),
+		i.runImage(images.CloudAppController),
 		i.imageWithEnvs(images.CloudAccountService, map[string]string{"cloudDomain": config.CloudDomain, "cloudPort": config.CloudPort}),
-		{Name: "sealos", Args: []string{"run", images.CloudLicenseController}},
+		i.runImage(images.CloudLicenseController),
 		i.imageWithEnv(images.CloudJobInitController, "PASSWORD_SALT", config.PasswordSalt),
-		{Name: "sealos", Args: []string{"run", images.CloudJobHeartbeatController}},
+		i.runImage(images.CloudJobHeartbeatController),
+	}
+	if includeInfrastructure {
+		commands = append(commands,
+			i.imageWithEnvs(images.CloudResourcesController, map[string]string{"MONGO_URI": config.DatabaseMongo, "DEFAULT_NAMESPACE": "resources-system"}),
+			i.imageWithEnvs(images.CloudAccountController, map[string]string{"MONGO_URI": config.DatabaseMongo, "TRAFFIC_MONGO_URI": config.DatabaseMongo, "cloudDomain": config.CloudDomain, "cloudPort": config.CloudPort, "DEFAULT_NAMESPACE": "account-system", "GLOBAL_COCKROACH_URI": config.DatabaseGlobalCockroach, "LOCAL_COCKROACH_URI": config.DatabaseLocalCockroach, "LOCAL_REGION": config.RegionUID, "ACCOUNT_API_JWT_SECRET": config.JWTInternal}),
+		)
 	}
 	for _, command := range commands {
-		if err := i.run(ctx, command); err != nil {
+		if err := i.runPackage(ctx, command); err != nil {
 			return err
 		}
 	}
@@ -795,11 +1606,11 @@ func (i *Installer) runCloud(ctx context.Context, images Images, config cloudCon
 		i.imageWithEnvs(images.CloudCostCenterFrontend, map[string]string{"cloudDomain": config.CloudDomain, "cloudPort": config.CloudPort, "certSecretName": "wildcard-cert", "transferEnabled": "true", "rechargeEnabled": "false", "jwtInternal": config.JWTInternal}),
 		i.imageWithEnvs(images.CloudTemplateFrontend, tlsEnv),
 		i.imageWithEnvs(images.CloudLicenseFrontend, map[string]string{"cloudDomain": config.CloudDomain, "cloudPort": config.CloudPort, "certSecretName": "wildcard-cert", "MONGODB_URI": config.DatabaseMongo + "/sealos-license?authSource=admin", "licensePurchaseDomain": "license.sealos.io"}),
-		{Name: "sealos", Args: []string{"run", images.CloudDatabaseService}},
-		{Name: "sealos", Args: []string{"run", images.CloudLaunchpadService}},
+		i.runImage(images.CloudDatabaseService),
+		i.runImage(images.CloudLaunchpadService),
 	}
 	for _, command := range frontendCommands {
-		if err := i.run(ctx, command); err != nil {
+		if err := i.runPackage(ctx, command); err != nil {
 			return err
 		}
 	}
@@ -811,16 +1622,21 @@ func (i *Installer) waitForDesktop(ctx context.Context) error {
 		return nil
 	}
 	return i.waitUntil(ctx, func() (bool, error) {
-		output, err := i.Runner.Output(ctx, Command{Name: "kubectl", Args: []string{"get", "pods", "-n", "sealos", "--no-headers"}})
+		output, err := i.Runner.Output(ctx, i.kubectlCommand("get", "pods", "-n", "sealos", "--no-headers"))
 		if err != nil {
 			return false, err
 		}
+		found := false
 		for _, line := range strings.Split(string(output), "\n") {
-			if strings.Contains(line, "desktop-frontend") && !strings.Contains(line, "Running") {
-				return false, nil
+			fields := strings.Fields(line)
+			if len(fields) > 0 && (strings.Contains(fields[0], "desktop-frontend") || strings.HasPrefix(fields[0], "sealos-desktop-")) {
+				found = true
+				if !strings.Contains(line, "Running") {
+					return false, nil
+				}
 			}
 		}
-		return true, nil
+		return found, nil
 	})
 }
 
@@ -829,7 +1645,7 @@ func (i *Installer) waitForNamespace(ctx context.Context) error {
 		return nil
 	}
 	return i.waitUntil(ctx, func() (bool, error) {
-		_, err := i.Runner.Output(ctx, Command{Name: "kubectl", Args: []string{"get", "ns", "ns-admin"}})
+		_, err := i.Runner.Output(ctx, i.kubectlCommand("get", "ns", "ns-admin"))
 		return err == nil, nil
 	})
 }

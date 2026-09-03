@@ -24,7 +24,7 @@ existing SEALOS_V2_* variables and this wrapper will disable prompting.
 
 Examples:
   sealos distribution install
-  sealos distribution install cloud@v5.1.0 --masters 192.0.2.10:22 --cloud-domain 192.0.2.10.nip.io
+  sealos distribution install cloud-pro@v5.1.2-rc6 --masters 192.0.2.10:22 --cloud-domain 192.0.2.10.nip.io
   SEALOS_V2_PACKAGE_MODE=source SEALOS_V2_SOURCE_ROOT=/path/to/sealos \
   ./install-v2.sh
   SEALOS_V2_MASTERS=192.0.2.10:22 \
@@ -33,7 +33,7 @@ Examples:
 HELP
 }
 
-distribution_ref="${SEALOS_V2_DISTRIBUTION:-cloud@v5.1.0}"
+distribution_ref="${SEALOS_V2_DISTRIBUTION:-cloud-pro@v5.1.2-rc6}"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     -h|--help)
@@ -62,7 +62,7 @@ done
 
 sealos_bin="${SEALOS_BIN:-sealos}"
 if ! command -v "$sealos_bin" >/dev/null 2>&1; then
-  cli_version="${SEALOS_V2_CLI_VERSION:-v5.1.0}"
+  cli_version="${SEALOS_V2_CLI_VERSION:-v5.1.2-rc6}"
   proxy_prefix=""
   if [[ "${SEALOS_V2_PROXY:-false}" == "true" ]]; then
     proxy_prefix="https://ghfast.top"

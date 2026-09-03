@@ -63,25 +63,75 @@ $ sealos run labring/redis-operator:3.1.4
 
 ## Installing Sealos Cloud from a Distribution
 
-Versioned Sealos Cloud installations are tracked by distribution manifests. The native CLI lists the available
-manifests and interactively asks for the cluster and access settings that are specific to the target environment:
+Versioned Sealos Cloud installations are tracked by distribution manifests in the external Sealos package repository.
+The CLI caches that Git repository locally and updates it at most once per day:
 
 ```shell
+sealos repo sync
+sealos repo status
 sealos distribution list
-sealos distribution install cloud@v5.1.0
+sealos distribution install cloud-pro@v5.1.2-rc6
 ```
+
+Use `--refresh` to force a repository update or `--offline` to use the existing cache. The repository can be
+overridden with `--repo`, `--repo-ref`, and `--repo-cache`, or with `SEALOS_PACKAGE_REPO`,
+`SEALOS_PACKAGE_REPO_REF`, and `SEALOS_PACKAGE_REPO_CACHE`. The default repository is
+`https://github.com/labring-sigs/sealos-package-repository.git`.
+
+The persistent configuration file is `$XDG_CONFIG_HOME/sealos/config.yaml` or
+`~/.config/sealos/config.yaml`:
+
+```yaml
+repository:
+  url: https://github.com/labring-sigs/sealos-package-repository.git
+  ref: main
+```
+
+Configuration precedence is CLI flags, environment variables, this file, then built-in defaults. The cache path is
+derived from the repository URL and ref when `cacheDir` is omitted.
+
+A minimal repository layout is available in [`examples/package-repository`](../examples/package-repository/README.md).
+It is documentation-only and can be used as a local repository with `--repo-cache` and `--offline`.
 
 Use `--interactive=false` with `--masters` and `--cloud-domain` for automation. The legacy
 `scripts/cloud/install-v2.sh` entrypoint remains as a compatibility wrapper and forwards to this command.
 
-Distribution entries reference versioned packages. A package can declare a remote OCI image and, when source is
-available, a local or Git build source. Remote images are the default resolution mode; source builds are explicit:
+Each distribution is a self-contained lock manifest. Every package records its remote OCI image, optional digest, and
+ordered local/Git build sources. Updating the package repository therefore does not require updating the Sealos binary,
+while an existing distribution remains reproducible:
+
+```yaml
+name: cloud
+version: v5.1.0
+packages:
+  - name: sealos-cloud-user-controller
+    version: v5.1.0
+    remote:
+      image: ghcr.io/labring/sealos-cloud-user-controller:v5.1.0
+      digest: sha256:...
+    sources:
+      - type: local
+        path: /workspace/sealos-cloud-user-controller
+        context: deploy
+        file: Kubefile
+      - type: git
+        url: https://github.com/labring/sealos-cloud-user-controller.git
+        ref: v5.1.0
+        context: deploy
+        file: Kubefile
+```
+
+Remote images are the default resolution mode; source builds are explicit:
 
 ```shell
-sealos distribution install cloud@v5.1.0 --package-mode remote
+sealos distribution install cloud-pro@v5.1.2-rc6 --package-mode remote
 sealos distribution install <distribution@version> --package-mode source
 sealos distribution install <distribution@version> --package-mode hybrid
 ```
+
+When a distribution contains multiple versions of the same bootstrap package, select the Cilium version explicitly
+with `--cilium-version` or `SEALOS_V2_CILIUM_VERSION`. The rc6 default is `v1.16.9`; set the option explicitly when
+using a distribution with a different available Cilium version.
 
 `source` remains supported for legacy packages. New packages should use ordered `sources`: the first available local
 checkout is preferred, and a Git source is cloned automatically when the local checkout is unavailable. `source.path`
