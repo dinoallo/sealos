@@ -84,14 +84,12 @@ func beginStartupStage(name string) func(error) {
 	return func(err error) {
 		duration := time.Since(startedAt)
 		if err != nil {
-			setupLog.Info(
+			setupLog.Error(err,
 				"startup stage failed",
 				"stage",
 				name,
 				"duration_ms",
 				duration.Milliseconds(),
-				"error",
-				err,
 			)
 			return
 		}
