@@ -66,6 +66,44 @@ func TestDistributionInstallDryRun(t *testing.T) {
 	require.Contains(t, output.String(), "--cluster prod")
 }
 
+func TestDistributionInstallConfigFile(t *testing.T) {
+	repository := t.TempDir()
+	manifestDir := filepath.Join(repository, "distributions", "cloud")
+	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
+	var manifest strings.Builder
+	manifest.WriteString("name: cloud\nversion: v1.0.0\nimages:\n")
+	for _, image := range testDistributionImages {
+		fmt.Fprintf(&manifest, "  - %s\n", image)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte(manifest.String()), 0o644))
+
+	configPath := filepath.Join(t.TempDir(), "install.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+cluster: configured
+masters: 192.0.2.10:22
+cloudDomain: config.example.com
+dryRun: true
+`), 0o600))
+
+	cmd := newDistributionInstallCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs([]string{
+		"cloud@v1.0.0",
+		"--interactive=false",
+		"--config", configPath,
+		"--cloud-domain", "cli.example.com",
+		"--repo-cache", repository,
+		"--offline",
+	})
+
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, output.String(), "--cluster configured")
+	require.Contains(t, output.String(), "cloudDomain=cli.example.com")
+	require.NotContains(t, output.String(), "cloudDomain=config.example.com")
+}
+
 var testDistributionImages = []string{
 	"ghcr.io/labring/sealos/kubernetes:v1.28.15",
 	"ghcr.io/labring/sealos/cilium:v1.17.1",

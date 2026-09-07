@@ -133,6 +133,28 @@ It is documentation-only and can be used as a local repository with `--repo-cach
 Use `--interactive=false` with `--masters` and `--cloud-domain` for automation. The legacy
 `scripts/cloud/install-v2.sh` entrypoint remains as a compatibility wrapper and forwards to this command.
 
+Installation parameters can also be kept in a YAML file and passed to both `install` and `update`:
+
+```yaml
+cluster: prod
+masters: 192.0.2.10
+nodes: ""
+cloudDomain: cloud.example.com
+cloudPort: 443
+user: root
+sshKey: /root/.ssh/id_rsa
+sshPort: 22
+registryPassword: change-me
+serviceNodePortRange: 30000-50000
+packageMode: remote
+ciliumVersion: v1.16.9
+```
+
+Use it with `sealos distribution install cloud-pro@v5.1.2-rc6 --config install.yaml` or
+`sealos distribution update cloud-pro@v5.1.2-rc7 --config install.yaml`. Command-line flags override the file;
+the file overrides environment variables and built-in defaults. In interactive mode, values supplied by the file are
+not prompted again. Unknown YAML fields and malformed values are rejected.
+
 Each distribution is a self-contained lock manifest. Every package records its remote OCI image, optional digest, and
 ordered local/Git build sources. Updating the package repository therefore does not require updating the Sealos binary,
 while an existing distribution remains reproducible:

@@ -54,6 +54,7 @@ func newDistributionInstallCmd() *cobra.Command {
 	repoOptions := newRepositoryCommandOptions()
 	interactive := true
 	positionalDistribution := false
+	configPath := ""
 
 	cmd := &cobra.Command{
 		Use:   "install [distribution@version]",
@@ -69,6 +70,10 @@ func newDistributionInstallCmd() *cobra.Command {
 			return nil
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
+			provided, err := applyDistributionConfigFile(configPath, &cfg, cmd, positionalDistribution)
+			if err != nil {
+				return err
+			}
 			if err := repoOptions.validate(cmd); err != nil {
 				return err
 			}
@@ -82,7 +87,7 @@ func newDistributionInstallCmd() *cobra.Command {
 				return err
 			}
 			if interactive {
-				if err := promptInstallConfig(cmd, &cfg, positionalDistribution, repo); err != nil {
+				if err := promptInstallConfig(&cfg, provided, repo); err != nil {
 					return err
 				}
 				if err := cfg.Validate(); err != nil {
@@ -108,7 +113,7 @@ func newDistributionInstallCmd() *cobra.Command {
 		},
 	}
 
-	addDistributionInstallerFlags(cmd, &cfg, repoOptions, &interactive)
+	addDistributionInstallerFlags(cmd, &cfg, repoOptions, &interactive, &configPath)
 	return cmd
 }
 
@@ -130,13 +135,16 @@ func newDistributionInstaller(cmd *cobra.Command, cfg cloudinstall.Config) (*clo
 	return &cloudinstall.Installer{Config: cfg, Runner: runner, Stdout: cmd.OutOrStdout(), Log: log}, log, nil
 }
 
-func addDistributionInstallerFlags(cmd *cobra.Command, cfg *cloudinstall.Config, repoOptions *repositoryCommandOptions, interactive *bool) {
+func addDistributionInstallerFlags(cmd *cobra.Command, cfg *cloudinstall.Config, repoOptions *repositoryCommandOptions, interactive *bool, configPath *string) {
 	flags := cmd.Flags()
 	if interactive != nil {
 		flags.BoolVar(interactive, "interactive", *interactive, "prompt for missing installation values")
 	}
 	if repoOptions != nil {
 		repoOptions.addFlags(cmd)
+	}
+	if configPath != nil {
+		flags.StringVar(configPath, "config", "", "YAML file containing installation parameters")
 	}
 	flags.StringVarP(&cfg.Distribution, "distribution", "d", cfg.Distribution, "distribution reference, for example cloud-pro@v5.1.2-rc6")
 	flags.StringVar((*string)(&cfg.PackageMode), "package-mode", string(cfg.PackageMode), "resolve packages from remote images, source builds, or hybrid source/remote mode")
@@ -172,8 +180,64 @@ func addDistributionInstallerFlags(cmd *cobra.Command, cfg *cloudinstall.Config,
 	flags.DurationVar(&cfg.WaitTimeout, "wait-timeout", cfg.WaitTimeout, "maximum time to wait for cluster resources")
 }
 
-func promptInstallConfig(cmd *cobra.Command, cfg *cloudinstall.Config, positionalDistribution bool, repo *distribution.Repository) error {
-	if !cmd.Flags().Changed("distribution") && !positionalDistribution {
+func distributionConfigOverrides(cmd *cobra.Command) map[string]bool {
+	keys := map[string]string{
+		"distribution":           "distribution",
+		"package-mode":           "packageMode",
+		"source-root":            "sourceRoot",
+		"source-cache":           "sourceCache",
+		"state-dir":              "stateDir",
+		"cluster":                "cluster",
+		"target-id":              "targetID",
+		"masters":                "masters",
+		"nodes":                  "nodes",
+		"user":                   "user",
+		"ssh-password":           "sshPassword",
+		"ssh-key":                "sshKey",
+		"ssh-key-passwd":         "sshKeyPassphrase",
+		"ssh-port":               "sshPort",
+		"registry-password":      "registryPassword",
+		"cloud-domain":           "cloudDomain",
+		"cloud-port":             "cloudPort",
+		"max-pods":               "maxPods",
+		"openebs-storage":        "openebsStorage",
+		"containerd-storage":     "containerdStorage",
+		"pod-cidr":               "podCIDR",
+		"service-cidr":           "serviceCIDR",
+		"service-nodeport-range": "serviceNodePortRange",
+		"cilium-version":         "ciliumVersion",
+		"cilium-masksize":        "ciliumMaskSize",
+		"cert-path":              "certPath",
+		"key-path":               "keyPath",
+		"enable-acme":            "enableACME",
+		"proxy":                  "proxy",
+		"dry-run":                "dryRun",
+		"config-dir":             "configDir",
+		"wait-timeout":           "waitTimeout",
+	}
+	provided := make(map[string]bool)
+	for flagName, configKey := range keys {
+		if cmd.Flags().Changed(flagName) {
+			provided[configKey] = true
+		}
+	}
+	return provided
+}
+
+func applyDistributionConfigFile(path string, cfg *cloudinstall.Config, cmd *cobra.Command, positionalDistribution bool) (map[string]bool, error) {
+	provided := distributionConfigOverrides(cmd)
+	if positionalDistribution {
+		provided["distribution"] = true
+	}
+	fileConfig, err := cloudinstall.LoadConfigFile(path)
+	if err != nil {
+		return nil, err
+	}
+	return fileConfig.Apply(cfg, provided), nil
+}
+
+func promptInstallConfig(cfg *cloudinstall.Config, provided map[string]bool, repo *distribution.Repository) error {
+	if !provided["distribution"] {
 		summaries, err := repo.List()
 		if err != nil {
 			return err
@@ -204,49 +268,49 @@ func promptInstallConfig(cmd *cobra.Command, cfg *cloudinstall.Config, positiona
 	}
 
 	var err error
-	if !cmd.Flags().Changed("cloud-domain") {
+	if !provided["cloudDomain"] {
 		cfg.CloudDomain, err = promptValue("Cloud domain", cfg.CloudDomain, true, false)
 		if err != nil {
 			return err
 		}
 	}
-	if !cmd.Flags().Changed("masters") {
+	if !provided["masters"] {
 		cfg.Masters, err = promptValue("Master nodes (comma-separated)", cfg.Masters, true, false)
 		if err != nil {
 			return err
 		}
 	}
-	if !cmd.Flags().Changed("nodes") {
+	if !provided["nodes"] {
 		cfg.Nodes, err = promptValue("Worker nodes (comma-separated, optional)", cfg.Nodes, false, false)
 		if err != nil {
 			return err
 		}
 	}
-	if !cmd.Flags().Changed("user") {
+	if !provided["user"] {
 		cfg.User, err = promptValue("SSH user", cfg.User, true, false)
 		if err != nil {
 			return err
 		}
 	}
-	if !cmd.Flags().Changed("ssh-key") {
+	if !provided["sshKey"] {
 		cfg.SSHKey, err = promptValue("SSH private key", cfg.SSHKey, false, false)
 		if err != nil {
 			return err
 		}
 	}
-	if !cmd.Flags().Changed("ssh-password") {
+	if !provided["sshPassword"] {
 		cfg.SSHPassword, err = promptValue("SSH password (optional)", cfg.SSHPassword, false, true)
 		if err != nil {
 			return err
 		}
 	}
-	if !cmd.Flags().Changed("registry-password") {
+	if !provided["registryPassword"] {
 		cfg.RegistryPass, err = promptValue("Local registry password", cfg.RegistryPass, true, true)
 		if err != nil {
 			return err
 		}
 	}
-	if !cmd.Flags().Changed("enable-acme") && cfg.CertPath == "" && cfg.KeyPath == "" && !cfg.EnableACME {
+	if !provided["enableACME"] && !provided["certPath"] && !provided["keyPath"] && cfg.CertPath == "" && cfg.KeyPath == "" && !cfg.EnableACME {
 		choice := promptui.Select{Label: "TLS certificate mode", Items: []string{"self-signed", "acme", "custom certificate"}}
 		_, value, err := choice.Run()
 		if err != nil {
@@ -427,23 +491,23 @@ func distributionState(cfg cloudinstall.Config) (*distribution.StateStore, *dist
 	return distribution.FindStateStore(cfg.StateDir, cfg.ClusterName)
 }
 
-func hydrateDistributionTarget(cfg *cloudinstall.Config, state *distribution.State) {
+func hydrateDistributionTarget(cfg *cloudinstall.Config, state *distribution.State, provided map[string]bool) {
 	if cfg == nil || state == nil {
 		return
 	}
-	if strings.TrimSpace(cfg.ClusterName) == "" && strings.TrimSpace(state.Target.Cluster) != "" {
+	if !provided["cluster"] && strings.TrimSpace(state.Target.Cluster) != "" {
 		cfg.ClusterName = state.Target.Cluster
 	}
-	if strings.TrimSpace(cfg.Masters) == "" {
+	if !provided["masters"] {
 		cfg.Masters = state.Target.Masters
 	}
-	if strings.TrimSpace(cfg.Nodes) == "" {
+	if !provided["nodes"] {
 		cfg.Nodes = state.Target.Nodes
 	}
-	if strings.TrimSpace(cfg.User) == "" {
+	if !provided["user"] {
 		cfg.User = state.Target.User
 	}
-	if cfg.SSHPort == 0 {
+	if !provided["sshPort"] {
 		cfg.SSHPort = state.Target.SSHPort
 	}
 }
@@ -549,32 +613,22 @@ func newDistributionUpdateCmd() *cobra.Command {
 	repoOptions := newRepositoryCommandOptions()
 	interactive := true
 	yes := false
+	configPath := ""
 	cmd := &cobra.Command{
 		Use:   "update <distribution@version>",
 		Short: "Apply a distribution update to the recorded target",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg.Distribution = args[0]
+			provided, err := applyDistributionConfigFile(configPath, &cfg, cmd, true)
+			if err != nil {
+				return err
+			}
 			_, state, err := distributionState(cfg)
 			if err != nil {
 				return fmt.Errorf("load distribution target state: %w", err)
 			}
-			hydrateDistributionTarget(&cfg, state)
-			if !cmd.Flags().Changed("cluster") && state.Target.Cluster != "" {
-				cfg.ClusterName = state.Target.Cluster
-			}
-			if !cmd.Flags().Changed("masters") {
-				cfg.Masters = state.Target.Masters
-			}
-			if !cmd.Flags().Changed("nodes") {
-				cfg.Nodes = state.Target.Nodes
-			}
-			if !cmd.Flags().Changed("user") && state.Target.User != "" {
-				cfg.User = state.Target.User
-			}
-			if !cmd.Flags().Changed("ssh-port") && state.Target.SSHPort != 0 {
-				cfg.SSHPort = state.Target.SSHPort
-			}
+			hydrateDistributionTarget(&cfg, state, provided)
 			if err := repoOptions.validate(cmd); err != nil {
 				return err
 			}
@@ -583,7 +637,7 @@ func newDistributionUpdateCmd() *cobra.Command {
 				return err
 			}
 			if interactive {
-				if err := promptInstallConfig(cmd, &cfg, true, repo); err != nil {
+				if err := promptInstallConfig(&cfg, provided, repo); err != nil {
 					return err
 				}
 			}
@@ -645,7 +699,7 @@ func newDistributionUpdateCmd() *cobra.Command {
 			return applyDistributionUpdate(cmd, cfg, args[0], diff, approved, !deferred)
 		},
 	}
-	addDistributionInstallerFlags(cmd, &cfg, repoOptions, &interactive)
+	addDistributionInstallerFlags(cmd, &cfg, repoOptions, &interactive, &configPath)
 	cmd.Flags().BoolVar(&yes, "yes", false, "apply the update without confirmation")
 	return cmd
 }

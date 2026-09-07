@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -192,6 +193,47 @@ func TestConfigFromEnv(t *testing.T) {
 	require.Equal(t, "/workspace/sealos", cfg.SourceRoot)
 	require.Equal(t, "/workspace/cache", cfg.SourceCache)
 	require.Equal(t, "v1.17.17", cfg.CiliumVersion)
+}
+
+func TestLoadConfigFileAndApply(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "install.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+cluster: prod
+masters: 192.0.2.10
+cloudDomain: cloud.example.com
+cloudPort: 8443
+packageMode: hybrid
+enableACME: false
+dryRun: false
+maxPods: 200
+waitTimeout: 45m
+targetID: target-prod
+`), 0o600))
+
+	fileConfig, err := LoadConfigFile(path)
+	require.NoError(t, err)
+	cfg := DefaultConfig()
+	cfg.CloudDomain = "cli.example.com"
+	cfg.EnableACME = true
+	cfg.DryRun = true
+	provided := fileConfig.Apply(&cfg, map[string]bool{"cloudDomain": true})
+
+	require.Equal(t, "prod", cfg.ClusterName)
+	require.Equal(t, "192.0.2.10", cfg.Masters)
+	require.Equal(t, "cli.example.com", cfg.CloudDomain)
+	require.Equal(t, uint16(8443), cfg.CloudPort)
+	require.Equal(t, distribution.ResolveHybrid, cfg.PackageMode)
+	require.False(t, cfg.EnableACME)
+	require.False(t, cfg.DryRun)
+	require.Equal(t, 200, cfg.MaxPods)
+	require.Equal(t, 45*time.Minute, cfg.WaitTimeout)
+	require.Equal(t, "target-prod", cfg.TargetID)
+	require.True(t, provided["cloudDomain"])
+	require.True(t, provided["enableACME"])
+
+	require.NoError(t, os.WriteFile(path, []byte("unknown: value\n"), 0o600))
+	_, err = LoadConfigFile(path)
+	require.ErrorContains(t, err, "unknown field")
 }
 
 func TestCommandRedactsSecrets(t *testing.T) {

@@ -31,6 +31,7 @@ import (
 
 	"github.com/labring/sealos/pkg/constants"
 	"github.com/labring/sealos/pkg/distribution"
+	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -167,6 +168,155 @@ type Config struct {
 	DryRun      bool
 	ConfigDir   string
 	WaitTimeout time.Duration
+}
+
+// configDuration accepts the human-readable duration format used by the CLI
+// while retaining JSON/YAML decoding errors for malformed values.
+type configDuration time.Duration
+
+func (d *configDuration) UnmarshalJSON(data []byte) error {
+	var value string
+	if err := json.Unmarshal(data, &value); err == nil {
+		parsed, err := time.ParseDuration(value)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", value, err)
+		}
+		*d = configDuration(parsed)
+		return nil
+	}
+
+	var nanos int64
+	if err := json.Unmarshal(data, &nanos); err != nil {
+		return errors.New("duration must be a string such as 30m or an integer number of nanoseconds")
+	}
+	*d = configDuration(nanos)
+	return nil
+}
+
+// ConfigFile is the optional YAML configuration file consumed by the native
+// distribution installer. Pointer fields distinguish omitted values from
+// explicit false, zero, and empty values.
+type ConfigFile struct {
+	Distribution         *string         `json:"distribution,omitempty" yaml:"distribution,omitempty"`
+	PackageMode          *string         `json:"packageMode,omitempty" yaml:"packageMode,omitempty"`
+	SourceRoot           *string         `json:"sourceRoot,omitempty" yaml:"sourceRoot,omitempty"`
+	SourceCache          *string         `json:"sourceCache,omitempty" yaml:"sourceCache,omitempty"`
+	StateDir             *string         `json:"stateDir,omitempty" yaml:"stateDir,omitempty"`
+	ClusterName          *string         `json:"cluster,omitempty" yaml:"cluster,omitempty"`
+	TargetID             *string         `json:"targetID,omitempty" yaml:"targetID,omitempty"`
+	Masters              *string         `json:"masters,omitempty" yaml:"masters,omitempty"`
+	Nodes                *string         `json:"nodes,omitempty" yaml:"nodes,omitempty"`
+	User                 *string         `json:"user,omitempty" yaml:"user,omitempty"`
+	SSHPassword          *string         `json:"sshPassword,omitempty" yaml:"sshPassword,omitempty"`
+	SSHKey               *string         `json:"sshKey,omitempty" yaml:"sshKey,omitempty"`
+	SSHKeyPasswd         *string         `json:"sshKeyPassphrase,omitempty" yaml:"sshKeyPassphrase,omitempty"`
+	SSHPort              *uint16         `json:"sshPort,omitempty" yaml:"sshPort,omitempty"`
+	RegistryPass         *string         `json:"registryPassword,omitempty" yaml:"registryPassword,omitempty"`
+	CloudDomain          *string         `json:"cloudDomain,omitempty" yaml:"cloudDomain,omitempty"`
+	CloudPort            *uint16         `json:"cloudPort,omitempty" yaml:"cloudPort,omitempty"`
+	MaxPods              *int            `json:"maxPods,omitempty" yaml:"maxPods,omitempty"`
+	OpenEBSStorage       *string         `json:"openebsStorage,omitempty" yaml:"openebsStorage,omitempty"`
+	ContainerdStorage    *string         `json:"containerdStorage,omitempty" yaml:"containerdStorage,omitempty"`
+	PodCIDR              *string         `json:"podCIDR,omitempty" yaml:"podCIDR,omitempty"`
+	ServiceCIDR          *string         `json:"serviceCIDR,omitempty" yaml:"serviceCIDR,omitempty"`
+	ServiceNodePortRange *string         `json:"serviceNodePortRange,omitempty" yaml:"serviceNodePortRange,omitempty"`
+	CiliumVersion        *string         `json:"ciliumVersion,omitempty" yaml:"ciliumVersion,omitempty"`
+	CiliumMaskSize       *string         `json:"ciliumMaskSize,omitempty" yaml:"ciliumMaskSize,omitempty"`
+	CertPath             *string         `json:"certPath,omitempty" yaml:"certPath,omitempty"`
+	KeyPath              *string         `json:"keyPath,omitempty" yaml:"keyPath,omitempty"`
+	EnableACME           *bool           `json:"enableACME,omitempty" yaml:"enableACME,omitempty"`
+	Proxy                *bool           `json:"proxy,omitempty" yaml:"proxy,omitempty"`
+	DryRun               *bool           `json:"dryRun,omitempty" yaml:"dryRun,omitempty"`
+	ConfigDir            *string         `json:"configDir,omitempty" yaml:"configDir,omitempty"`
+	WaitTimeout          *configDuration `json:"waitTimeout,omitempty" yaml:"waitTimeout,omitempty"`
+}
+
+// LoadConfigFile reads a strict YAML configuration file. An empty path means
+// that no file was requested and returns an empty configuration.
+func LoadConfigFile(path string) (ConfigFile, error) {
+	if strings.TrimSpace(path) == "" {
+		return ConfigFile{}, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ConfigFile{}, fmt.Errorf("read installation config %q: %w", path, err)
+	}
+	var config ConfigFile
+	if err := yaml.UnmarshalStrict(data, &config); err != nil {
+		return ConfigFile{}, fmt.Errorf("decode installation config %q: %w", path, err)
+	}
+	return config, nil
+}
+
+// Apply overlays the file values on cfg unless the corresponding key is
+// already marked as overridden. The returned map also marks values supplied by
+// the file, so interactive prompts can avoid asking for them again.
+func (f ConfigFile) Apply(cfg *Config, overridden map[string]bool) map[string]bool {
+	provided := make(map[string]bool, len(overridden))
+	for key, value := range overridden {
+		provided[key] = value
+	}
+	setString := func(key string, value *string, target *string) {
+		if value != nil && !provided[key] {
+			*target = *value
+			provided[key] = true
+		}
+	}
+	setUint16 := func(key string, value *uint16, target *uint16) {
+		if value != nil && !provided[key] {
+			*target = *value
+			provided[key] = true
+		}
+	}
+	setInt := func(key string, value *int, target *int) {
+		if value != nil && !provided[key] {
+			*target = *value
+			provided[key] = true
+		}
+	}
+	setBool := func(key string, value *bool, target *bool) {
+		if value != nil && !provided[key] {
+			*target = *value
+			provided[key] = true
+		}
+	}
+
+	setString("distribution", f.Distribution, &cfg.Distribution)
+	setString("packageMode", f.PackageMode, (*string)(&cfg.PackageMode))
+	setString("sourceRoot", f.SourceRoot, &cfg.SourceRoot)
+	setString("sourceCache", f.SourceCache, &cfg.SourceCache)
+	setString("stateDir", f.StateDir, &cfg.StateDir)
+	setString("cluster", f.ClusterName, &cfg.ClusterName)
+	setString("targetID", f.TargetID, &cfg.TargetID)
+	setString("masters", f.Masters, &cfg.Masters)
+	setString("nodes", f.Nodes, &cfg.Nodes)
+	setString("user", f.User, &cfg.User)
+	setString("sshPassword", f.SSHPassword, &cfg.SSHPassword)
+	setString("sshKey", f.SSHKey, &cfg.SSHKey)
+	setString("sshKeyPassphrase", f.SSHKeyPasswd, &cfg.SSHKeyPasswd)
+	setUint16("sshPort", f.SSHPort, &cfg.SSHPort)
+	setString("registryPassword", f.RegistryPass, &cfg.RegistryPass)
+	setString("cloudDomain", f.CloudDomain, &cfg.CloudDomain)
+	setUint16("cloudPort", f.CloudPort, &cfg.CloudPort)
+	setInt("maxPods", f.MaxPods, &cfg.MaxPods)
+	setString("openebsStorage", f.OpenEBSStorage, &cfg.OpenEBSStorage)
+	setString("containerdStorage", f.ContainerdStorage, &cfg.ContainerdStorage)
+	setString("podCIDR", f.PodCIDR, &cfg.PodCIDR)
+	setString("serviceCIDR", f.ServiceCIDR, &cfg.ServiceCIDR)
+	setString("serviceNodePortRange", f.ServiceNodePortRange, &cfg.ServiceNodePortRange)
+	setString("ciliumVersion", f.CiliumVersion, &cfg.CiliumVersion)
+	setString("ciliumMaskSize", f.CiliumMaskSize, &cfg.CiliumMaskSize)
+	setString("certPath", f.CertPath, &cfg.CertPath)
+	setString("keyPath", f.KeyPath, &cfg.KeyPath)
+	setBool("enableACME", f.EnableACME, &cfg.EnableACME)
+	setBool("proxy", f.Proxy, &cfg.Proxy)
+	setBool("dryRun", f.DryRun, &cfg.DryRun)
+	setString("configDir", f.ConfigDir, &cfg.ConfigDir)
+	if f.WaitTimeout != nil && !provided["waitTimeout"] {
+		cfg.WaitTimeout = time.Duration(*f.WaitTimeout)
+		provided["waitTimeout"] = true
+	}
+	return provided
 }
 
 func (c Config) ValidateReset() error {
