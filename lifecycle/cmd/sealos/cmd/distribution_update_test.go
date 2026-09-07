@@ -38,11 +38,12 @@ func TestDistributionAdoptAndDiff(t *testing.T) {
 		"--repo-cache", repository,
 		"--offline",
 		"--state-dir", stateDir,
-		"--target-id", "target-a",
+		"--cluster", "prod",
+		"--masters", "192.0.2.10",
 	})
 	require.NoError(t, adopt.Execute())
 	require.Contains(t, adoptOutput.String(), "adopted distribution: cloud@v1.0.0")
-	store, err := distribution.NewStateStore(stateDir, "target-a")
+	store, err := distribution.NewStateStore(stateDir, "prod")
 	require.NoError(t, err)
 	state, err := store.Load()
 	require.NoError(t, err)
@@ -57,7 +58,7 @@ func TestDistributionAdoptAndDiff(t *testing.T) {
 		"--repo-cache", repository,
 		"--offline",
 		"--state-dir", stateDir,
-		"--target-id", "target-a",
+		"--cluster", "prod",
 	})
 	require.NoError(t, diff.Execute())
 	require.Contains(t, diffOutput.String(), "= demo@v1.0.0")
@@ -74,7 +75,8 @@ func TestDistributionUpdateDryRunDoesNotWriteTransaction(t *testing.T) {
 		"--repo-cache", repository,
 		"--offline",
 		"--state-dir", stateDir,
-		"--target-id", "target-a",
+		"--cluster", "prod",
+		"--masters", "192.0.2.10",
 	})
 	require.NoError(t, adopt.Execute())
 
@@ -85,19 +87,72 @@ func TestDistributionUpdateDryRunDoesNotWriteTransaction(t *testing.T) {
 	update.SetArgs([]string{
 		"cloud@v2.0.0",
 		"--interactive=false",
-		"--masters", "192.0.2.10",
 		"--cloud-domain", "cloud.example.com",
 		"--repo-cache", repository,
 		"--offline",
 		"--state-dir", stateDir,
-		"--target-id", "target-a",
+		"--cluster", "prod",
 		"--dry-run",
 	})
 	require.NoError(t, update.Execute())
 	require.Contains(t, output.String(), "+ extra@v1.0.0")
-	entries, err := os.ReadDir(filepath.Join(stateDir, "targets", "target-a", "transactions"))
+	entries, err := os.ReadDir(filepath.Join(stateDir, "targets", "prod", "transactions"))
 	require.Error(t, err)
 	require.Empty(t, entries)
+}
+
+func TestDistributionResetDryRunKeepsState(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := distribution.NewStateStore(stateDir, "prod")
+	require.NoError(t, err)
+	require.NoError(t, store.Save(&distribution.State{
+		Target: distribution.TargetMetadata{
+			Cluster: "prod",
+			Masters: "192.0.2.10",
+			User:    "root",
+			SSHPort: 22,
+		},
+		Distribution: "cloud@v1.0.0",
+		Packages: []distribution.InstalledPackage{{
+			Name: "demo", Version: "v1.0.0", Fingerprint: "sha256:demo", Status: distribution.PackageStatusInstalled,
+		}},
+	}))
+
+	cmd := newDistributionResetCmd()
+	var output bytes.Buffer
+	cmd.SetOut(&output)
+	cmd.SetErr(&output)
+	cmd.SetArgs([]string{
+		"--interactive=false",
+		"--cluster", "prod",
+		"--state-dir", stateDir,
+		"--dry-run",
+		"--force",
+	})
+	require.NoError(t, cmd.Execute())
+	require.Contains(t, output.String(), "distribution reset completed")
+	_, err = store.Load()
+	require.NoError(t, err)
+}
+
+func TestDistributionResetCanRestoreTargetFromState(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := distribution.NewStateStore(stateDir, "target-a")
+	require.NoError(t, err)
+	require.NoError(t, store.Save(&distribution.State{
+		Target:       distribution.TargetMetadata{Masters: "192.0.2.10", SSHPort: 22},
+		Distribution: "cloud@v1.0.0",
+	}))
+
+	cmd := newDistributionResetCmd()
+	cmd.SetArgs([]string{
+		"--interactive=false",
+		"--target-id", "target-a",
+		"--state-dir", stateDir,
+		"--dry-run",
+		"--force",
+	})
+	require.NoError(t, cmd.Execute())
 }
 
 func writeUpdateTestRepository(t *testing.T) string {

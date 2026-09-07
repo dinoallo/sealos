@@ -78,10 +78,25 @@ After installing a distribution, the CLI records its package state on the contro
 cluster. To inspect and apply a newer SOTW manifest:
 
 ```shell
-sealos distribution diff cloud-pro@v5.1.2-rc7 --masters 192.0.2.10
-sealos distribution update cloud-pro@v5.1.2-rc7 --masters 192.0.2.10
-sealos distribution status --masters 192.0.2.10
+sealos distribution diff cloud-pro@v5.1.2-rc7 --cluster default
+sealos distribution update cloud-pro@v5.1.2-rc7 --cluster default
+sealos distribution status --cluster default
 ```
+
+To remove a distribution-installed cluster, use the distribution-specific reset command. It validates the recorded
+target, removes the distribution runtime, reuses the existing cluster reset engine, and deletes the local package
+state only after the remote reset succeeds:
+
+```shell
+sealos distribution reset --cluster default
+```
+
+`--cluster` is the stable cluster name or ID used by distribution state. Master and worker addresses are connection
+metadata, not cluster identity, so changing a master address does not create a new distribution target. Use
+`--masters`, `--nodes`, `--user`, `--ssh-key`, or `--ssh-port` only for the initial install/adopt or to override
+recorded connection metadata. `--target-id` remains a compatibility alias for older state directories. Add `--force`
+only when the destructive confirmation should be skipped. This command is separate from `sealos reset`, which
+continues to operate on a named legacy Clusterfile.
 
 New packages are installed in SOTW order. Changed standalone packages are applied after confirmation. Kubernetes,
 Cilium, and Cloud aggregate package changes are reported as blocked, while packages removed from a newer SOTW are
@@ -89,11 +104,11 @@ reported as orphaned and are not automatically uninstalled. Use `--yes` for non-
 cluster created before package-state tracking must be adopted explicitly:
 
 ```shell
-sealos distribution adopt cloud-pro@v5.1.2-rc6 --masters 192.0.2.10
+sealos distribution adopt cloud-pro@v5.1.2-rc6 --cluster default --masters 192.0.2.10
 ```
 
-Use `--target-id` when the same control machine manages multiple targets, and `--state-dir` to select a different
-state root for an isolated environment or test.
+Use a different `--cluster` value when the same control machine manages multiple clusters, and `--state-dir` to
+select a different state root for an isolated environment or test.
 
 Use `--refresh` to force a repository update or `--offline` to use the existing cache. The repository can be
 overridden with `--repo`, `--repo-ref`, and `--repo-cache`, or with `SEALOS_PACKAGE_REPO`,

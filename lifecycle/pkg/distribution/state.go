@@ -57,6 +57,17 @@ type InstalledPackage struct {
 	InstalledAt time.Time   `json:"installedAt"`
 }
 
+// TargetMetadata contains the non-sensitive connection data needed to manage
+// a distribution target after installation. Credentials are intentionally not
+// persisted here.
+type TargetMetadata struct {
+	Cluster string `json:"cluster,omitempty"`
+	Masters string `json:"masters,omitempty"`
+	Nodes   string `json:"nodes,omitempty"`
+	User    string `json:"user,omitempty"`
+	SSHPort uint16 `json:"sshPort,omitempty"`
+}
+
 func (p InstalledPackage) Ref() string {
 	return p.Name + "@" + p.Version
 }
@@ -80,6 +91,7 @@ func NewInstalledPackage(pkg Package, image string, mode ResolveMode, status str
 type State struct {
 	SchemaVersion       int                `json:"schemaVersion"`
 	TargetID            string             `json:"targetID"`
+	Target              TargetMetadata     `json:"target,omitempty"`
 	Distribution        string             `json:"distribution"`
 	ManifestFingerprint string             `json:"manifestFingerprint"`
 	RepositoryCommit    string             `json:"repositoryCommit,omitempty"`
@@ -163,6 +175,66 @@ func (s *StateStore) Load() (*State, error) {
 	return state, nil
 }
 
+// FindStateStore locates the package state for a stable cluster name or ID.
+// New state uses the cluster name as its directory. The scan retains
+// compatibility with state written by older versions, which used a hash of
+// the master addresses as the directory name.
+func FindStateStore(root, cluster string) (*StateStore, *State, error) {
+	cluster = strings.TrimSpace(cluster)
+	if cluster == "" {
+		return nil, nil, errors.New("cluster name or ID is required")
+	}
+	preferred, err := NewStateStore(root, cluster)
+	if err != nil {
+		return nil, nil, err
+	}
+	state, err := preferred.Load()
+	if err == nil {
+		return preferred, state, nil
+	}
+	if !errors.Is(err, ErrPackageStateNotFound) {
+		return nil, nil, err
+	}
+
+	entries, err := os.ReadDir(filepath.Join(preferred.Root, "targets"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil, ErrPackageStateNotFound
+	}
+	if err != nil {
+		return nil, nil, fmt.Errorf("list package state targets: %w", err)
+	}
+	var matchStore *StateStore
+	var matchState *State
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == cluster {
+			continue
+		}
+		candidate, candidateErr := NewStateStore(preferred.Root, entry.Name())
+		if candidateErr != nil {
+			continue
+		}
+		candidateState, candidateErr := candidate.Load()
+		if errors.Is(candidateErr, ErrPackageStateNotFound) {
+			continue
+		}
+		if candidateErr != nil {
+			return nil, nil, candidateErr
+		}
+		if candidateState.Target.Cluster != cluster {
+			continue
+		}
+		if matchStore != nil {
+			return nil, nil, fmt.Errorf("multiple package states found for cluster %q", cluster)
+		}
+		matchStore = candidate
+		matchState = candidateState
+	}
+	if matchStore == nil {
+		return nil, nil, ErrPackageStateNotFound
+	}
+	return matchStore, matchState, nil
+}
+
 func (s *StateStore) Save(state *State) error {
 	if s == nil {
 		return errors.New("state store is nil")
@@ -177,6 +249,23 @@ func (s *StateStore) Save(state *State) error {
 		return err
 	}
 	return writeJSONAtomically(s.statePath(), state)
+}
+
+// Remove deletes all local package state for this target. It must only be
+// called after the remote reset has completed successfully.
+func (s *StateStore) Remove() error {
+	if s == nil {
+		return errors.New("state store is nil")
+	}
+	unlock, err := s.Lock(context.Background())
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if err := os.RemoveAll(s.targetDir()); err != nil {
+		return fmt.Errorf("remove package state: %w", err)
+	}
+	return nil
 }
 
 func (s *StateStore) SaveTransaction(transaction *Transaction) error {
@@ -296,7 +385,8 @@ func writeJSONAtomically(path string, value interface{}) error {
 	return nil
 }
 
-// TargetID returns a deterministic identifier without storing credentials.
+// TargetID returns the legacy deterministic identifier without storing
+// credentials. New callers should use a stable cluster name or ID instead.
 func TargetID(masters string, sshPort uint16) string {
 	items := strings.FieldsFunc(masters, func(r rune) bool { return r == ',' || r == ' ' || r == '\t' || r == '\n' })
 	for index := range items {

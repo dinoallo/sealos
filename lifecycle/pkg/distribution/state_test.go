@@ -27,6 +27,13 @@ func TestStateStoreRoundTripAndTransaction(t *testing.T) {
 	store, err := NewStateStore(t.TempDir(), "target-a")
 	require.NoError(t, err)
 	state := &State{
+		Target: TargetMetadata{
+			Cluster: "default",
+			Masters: "192.0.2.10",
+			Nodes:   "192.0.2.11",
+			User:    "root",
+			SSHPort: 22,
+		},
 		Distribution:        "cloud@v1.0.0",
 		ManifestFingerprint: "sha256:manifest",
 		Packages: []InstalledPackage{{
@@ -38,6 +45,7 @@ func TestStateStoreRoundTripAndTransaction(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, PackageStateSchema, loaded.SchemaVersion)
 	require.Equal(t, "target-a", loaded.TargetID)
+	require.Equal(t, state.Target, loaded.Target)
 	require.Equal(t, state.Distribution, loaded.Distribution)
 	require.Equal(t, state.Packages, loaded.Packages)
 
@@ -48,11 +56,49 @@ func TestStateStoreRoundTripAndTransaction(t *testing.T) {
 	require.Contains(t, string(data), `"status": "applying"`)
 }
 
+func TestStateStoreRemoveDeletesTargetState(t *testing.T) {
+	store, err := NewStateStore(t.TempDir(), "target-a")
+	require.NoError(t, err)
+	require.NoError(t, store.Save(&State{Distribution: "cloud@v1.0.0"}))
+	require.NoError(t, store.Remove())
+	_, err = store.Load()
+	require.ErrorIs(t, err, ErrPackageStateNotFound)
+}
+
 func TestStateStoreMissingState(t *testing.T) {
 	store, err := NewStateStore(t.TempDir(), "target-a")
 	require.NoError(t, err)
 	_, err = store.Load()
 	require.ErrorIs(t, err, ErrPackageStateNotFound)
+}
+
+func TestFindStateStoreUsesClusterName(t *testing.T) {
+	root := t.TempDir()
+	store, err := NewStateStore(root, "prod")
+	require.NoError(t, err)
+	require.NoError(t, store.Save(&State{Target: TargetMetadata{Cluster: "prod"}}))
+
+	found, state, err := FindStateStore(root, "prod")
+	require.NoError(t, err)
+	require.Equal(t, "prod", found.TargetID)
+	require.Equal(t, "prod", state.Target.Cluster)
+}
+
+func TestFindStateStoreFindsLegacyMasterHashByClusterName(t *testing.T) {
+	root := t.TempDir()
+	legacyID := TargetID("192.0.2.10", 22)
+	store, err := NewStateStore(root, legacyID)
+	require.NoError(t, err)
+	require.NoError(t, store.Save(&State{Target: TargetMetadata{
+		Cluster: "prod",
+		Masters: "192.0.2.10",
+		SSHPort: 22,
+	}}))
+
+	found, state, err := FindStateStore(root, "prod")
+	require.NoError(t, err)
+	require.Equal(t, legacyID, found.TargetID)
+	require.Equal(t, "192.0.2.10", state.Target.Masters)
 }
 
 func TestStateStoreRejectsDuplicatePackages(t *testing.T) {

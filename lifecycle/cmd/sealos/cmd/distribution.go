@@ -45,6 +45,7 @@ func newDistributionCmd() *cobra.Command {
 	cmd.AddCommand(newDistributionUpdateCmd())
 	cmd.AddCommand(newDistributionAdoptCmd())
 	cmd.AddCommand(newDistributionStatusCmd())
+	cmd.AddCommand(newDistributionResetCmd())
 	return cmd
 }
 
@@ -141,6 +142,7 @@ func addDistributionInstallerFlags(cmd *cobra.Command, cfg *cloudinstall.Config,
 	flags.StringVar((*string)(&cfg.PackageMode), "package-mode", string(cfg.PackageMode), "resolve packages from remote images, source builds, or hybrid source/remote mode")
 	flags.StringVar(&cfg.SourceRoot, "source-root", cfg.SourceRoot, "compatibility base for relative local package source paths")
 	flags.StringVar(&cfg.SourceCache, "source-cache", cfg.SourceCache, "persistent cache directory for Git package sources")
+	flags.StringVar(&cfg.ClusterName, "cluster", cfg.ClusterName, "stable cluster name or ID used to manage package state")
 	flags.StringVar(&cfg.Masters, "masters", cfg.Masters, "comma-separated master nodes")
 	flags.StringVar(&cfg.Nodes, "nodes", cfg.Nodes, "comma-separated worker nodes")
 	flags.StringVar(&cfg.CloudDomain, "cloud-domain", cfg.CloudDomain, "domain used to expose Sealos Cloud")
@@ -391,6 +393,7 @@ func addDistributionStateFlags(cmd *cobra.Command, cfg *cloudinstall.Config, rep
 	flags.StringVar((*string)(&cfg.PackageMode), "package-mode", string(cfg.PackageMode), "resolve packages from remote images, source builds, or hybrid source/remote mode")
 	flags.StringVar(&cfg.SourceRoot, "source-root", cfg.SourceRoot, "compatibility base for relative local package source paths")
 	flags.StringVar(&cfg.SourceCache, "source-cache", cfg.SourceCache, "persistent cache directory for Git package sources")
+	flags.StringVar(&cfg.ClusterName, "cluster", cfg.ClusterName, "stable cluster name or ID used to manage package state")
 	flags.StringVar(&cfg.Masters, "masters", cfg.Masters, "comma-separated master nodes")
 	flags.Uint16Var(&cfg.SSHPort, "ssh-port", cfg.SSHPort, "SSH port")
 	flags.StringVar(&cfg.StateDir, "state-dir", cfg.StateDir, "package state directory")
@@ -402,10 +405,47 @@ func distributionTargetID(cfg cloudinstall.Config) (string, error) {
 	if strings.TrimSpace(cfg.TargetID) != "" {
 		return cfg.TargetID, nil
 	}
-	if strings.TrimSpace(cfg.Masters) == "" {
-		return "", errors.New("masters or target-id is required")
+	if strings.TrimSpace(cfg.ClusterName) == "" {
+		return "", errors.New("cluster or target-id is required")
 	}
-	return distribution.TargetID(cfg.Masters, cfg.SSHPort), nil
+	return cfg.ClusterName, nil
+}
+
+func distributionState(cfg cloudinstall.Config) (*distribution.StateStore, *distribution.State, error) {
+	if strings.TrimSpace(cfg.TargetID) != "" {
+		targetID, err := distributionTargetID(cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+		if err != nil {
+			return nil, nil, err
+		}
+		state, err := store.Load()
+		return store, state, err
+	}
+	return distribution.FindStateStore(cfg.StateDir, cfg.ClusterName)
+}
+
+func hydrateDistributionTarget(cfg *cloudinstall.Config, state *distribution.State) {
+	if cfg == nil || state == nil {
+		return
+	}
+	if strings.TrimSpace(cfg.ClusterName) == "" && strings.TrimSpace(state.Target.Cluster) != "" {
+		cfg.ClusterName = state.Target.Cluster
+	}
+	if strings.TrimSpace(cfg.Masters) == "" {
+		cfg.Masters = state.Target.Masters
+	}
+	if strings.TrimSpace(cfg.Nodes) == "" {
+		cfg.Nodes = state.Target.Nodes
+	}
+	if strings.TrimSpace(cfg.User) == "" {
+		cfg.User = state.Target.User
+	}
+	if cfg.SSHPort == 0 {
+		cfg.SSHPort = state.Target.SSHPort
+	}
 }
 
 func loadDistributionDiff(repo *distribution.Repository, ref string, cfg cloudinstall.Config) (distribution.Diff, error) {
@@ -422,22 +462,14 @@ func loadDistributionDiff(repo *distribution.Repository, ref string, cfg cloudin
 	if err != nil {
 		return distribution.Diff{}, err
 	}
-	targetID, err := distributionTargetID(cfg)
-	if err != nil {
-		return distribution.Diff{}, err
-	}
-	store, err := distribution.NewStateStore(cfg.StateDir, targetID)
-	if err != nil {
-		return distribution.Diff{}, err
-	}
-	state, err := store.Load()
+	store, state, err := distributionState(cfg)
 	if err != nil {
 		if errors.Is(err, distribution.ErrPackageStateNotFound) {
 			return distribution.Diff{}, fmt.Errorf("%w; run distribution adopt %s first", err, ref)
 		}
 		return distribution.Diff{}, err
 	}
-	diff, err := distribution.Compare(manifest, resolved, state, targetID)
+	diff, err := distribution.Compare(manifest, resolved, state, store.TargetID)
 	if err != nil {
 		return distribution.Diff{}, err
 	}
@@ -523,6 +555,26 @@ func newDistributionUpdateCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg.Distribution = args[0]
+			_, state, err := distributionState(cfg)
+			if err != nil {
+				return fmt.Errorf("load distribution target state: %w", err)
+			}
+			hydrateDistributionTarget(&cfg, state)
+			if !cmd.Flags().Changed("cluster") && state.Target.Cluster != "" {
+				cfg.ClusterName = state.Target.Cluster
+			}
+			if !cmd.Flags().Changed("masters") {
+				cfg.Masters = state.Target.Masters
+			}
+			if !cmd.Flags().Changed("nodes") {
+				cfg.Nodes = state.Target.Nodes
+			}
+			if !cmd.Flags().Changed("user") && state.Target.User != "" {
+				cfg.User = state.Target.User
+			}
+			if !cmd.Flags().Changed("ssh-port") && state.Target.SSHPort != 0 {
+				cfg.SSHPort = state.Target.SSHPort
+			}
 			if err := repoOptions.validate(cmd); err != nil {
 				return err
 			}
@@ -609,11 +661,7 @@ func distributionActionableChanges(diff distribution.Diff) []distribution.Packag
 }
 
 func updateDistributionMetadata(cfg cloudinstall.Config, diff distribution.Diff, repositoryCommit string) error {
-	targetID, err := distributionTargetID(cfg)
-	if err != nil {
-		return err
-	}
-	store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+	store, _, err := distributionState(cfg)
 	if err != nil {
 		return err
 	}
@@ -633,11 +681,7 @@ func updateDistributionMetadata(cfg cloudinstall.Config, diff distribution.Diff,
 }
 
 func applyDistributionUpdate(cmd *cobra.Command, cfg cloudinstall.Config, ref string, diff distribution.Diff, actionable []distribution.PackageChange, advanceDistribution bool) error {
-	targetID, err := distributionTargetID(cfg)
-	if err != nil {
-		return err
-	}
-	store, err := distribution.NewStateStore(cfg.StateDir, targetID)
+	store, _, err := distributionState(cfg)
 	if err != nil {
 		return err
 	}
@@ -791,6 +835,13 @@ func newDistributionAdoptCmd() *cobra.Command {
 				packages[index].Status = distribution.PackageStatusAdopted
 			}
 			if err := store.Save(&distribution.State{
+				Target: distribution.TargetMetadata{
+					Cluster: cfg.ClusterName,
+					Masters: cfg.Masters,
+					Nodes:   cfg.Nodes,
+					User:    cfg.User,
+					SSHPort: cfg.SSHPort,
+				},
 				Distribution:        manifest.Ref(),
 				ManifestFingerprint: manifest.Fingerprint(),
 				RepositoryCommit:    status.Commit,
@@ -814,19 +865,11 @@ func newDistributionStatusCmd() *cobra.Command {
 		Short: "Show the recorded package state",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			targetID, err := distributionTargetID(cfg)
+			store, state, err := distributionState(cfg)
 			if err != nil {
 				return err
 			}
-			store, err := distribution.NewStateStore(cfg.StateDir, targetID)
-			if err != nil {
-				return err
-			}
-			state, err := store.Load()
-			if err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "target: %s\ndistribution: %s\nmanifest: %s\n", state.TargetID, state.Distribution, state.ManifestFingerprint)
+			fmt.Fprintf(cmd.OutOrStdout(), "cluster: %s\ntarget: %s\ndistribution: %s\nmanifest: %s\nmasters: %s\nnodes: %s\n", state.Target.Cluster, store.TargetID, state.Distribution, state.ManifestFingerprint, state.Target.Masters, state.Target.Nodes)
 			for _, pkg := range state.Packages {
 				fmt.Fprintf(cmd.OutOrStdout(), "%s %s\n", pkg.Ref(), pkg.Status)
 			}
@@ -835,4 +878,146 @@ func newDistributionStatusCmd() *cobra.Command {
 	}
 	addDistributionStateFlags(cmd, &cfg, nil)
 	return cmd
+}
+
+func newDistributionResetCmd() *cobra.Command {
+	cfg := cloudinstall.ConfigFromEnv(os.LookupEnv)
+	interactive := true
+	force := false
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Reset a distribution-installed cluster",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			store, state, err := distributionState(cfg)
+			if err != nil {
+				return fmt.Errorf("load distribution target state: %w", err)
+			}
+			if !cmd.Flags().Changed("masters") && state.Target.Masters != "" {
+				cfg.Masters = state.Target.Masters
+			}
+			if !cmd.Flags().Changed("nodes") {
+				cfg.Nodes = state.Target.Nodes
+			}
+			if !cmd.Flags().Changed("user") && state.Target.User != "" {
+				cfg.User = state.Target.User
+			}
+			if !cmd.Flags().Changed("ssh-port") && state.Target.SSHPort != 0 {
+				cfg.SSHPort = state.Target.SSHPort
+			}
+			if strings.TrimSpace(cfg.Masters) == "" {
+				return errors.New("recorded target has no master nodes; provide --masters")
+			}
+			if interactive {
+				if err := promptDistributionResetConfig(cmd, &cfg); err != nil {
+					return err
+				}
+			}
+			if err := cfg.ValidateReset(); err != nil {
+				return fmt.Errorf("invalid reset configuration: %w", err)
+			}
+			clusterName := cfg.ClusterName
+			if !cmd.Flags().Changed("cluster") && state.Target.Cluster != "" {
+				clusterName = state.Target.Cluster
+			}
+			if err := validateResetTarget(state, clusterName); err != nil {
+				return err
+			}
+			if !force && !cfg.DryRun {
+				confirm := promptui.Select{
+					Label:     fmt.Sprintf("Reset distribution cluster %s", clusterName),
+					Items:     []string{"yes", "no"},
+					CursorPos: 1,
+				}
+				_, answer, err := confirm.Run()
+				if err != nil {
+					return err
+				}
+				if answer != "yes" {
+					return nil
+				}
+			}
+			installer, log, err := newDistributionInstaller(cmd, cfg)
+			if err != nil {
+				return err
+			}
+			if log != nil {
+				defer log.Close()
+			}
+			if err := installer.Reset(cmd.Context(), clusterName); err != nil {
+				return err
+			}
+			if !cfg.DryRun {
+				if err := store.Remove(); err != nil {
+					return err
+				}
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "distribution reset completed: %s\n", clusterName)
+			return nil
+		},
+	}
+	addDistributionResetFlags(cmd, &cfg, &interactive, &force)
+	return cmd
+}
+
+func addDistributionResetFlags(cmd *cobra.Command, cfg *cloudinstall.Config, interactive, force *bool) {
+	flags := cmd.Flags()
+	flags.BoolVar(interactive, "interactive", *interactive, "prompt for missing reset values")
+	flags.BoolVar(force, "force", *force, "skip the reset confirmation")
+	flags.BoolVar(&cfg.DryRun, "dry-run", cfg.DryRun, "print the reset commands without executing them")
+	flags.StringVar(&cfg.ClusterName, "cluster", cfg.ClusterName, "stable cluster name or ID used to manage package state")
+	flags.StringVar(&cfg.Masters, "masters", cfg.Masters, "comma-separated master nodes")
+	flags.StringVar(&cfg.Nodes, "nodes", cfg.Nodes, "comma-separated worker nodes")
+	flags.StringVar(&cfg.User, "user", cfg.User, "SSH user")
+	flags.StringVar(&cfg.SSHPassword, "ssh-password", cfg.SSHPassword, "SSH password")
+	flags.StringVar(&cfg.SSHKey, "ssh-key", cfg.SSHKey, "SSH private key path")
+	flags.StringVar(&cfg.SSHKeyPasswd, "ssh-key-passwd", cfg.SSHKeyPasswd, "SSH private key passphrase")
+	flags.Uint16Var(&cfg.SSHPort, "ssh-port", cfg.SSHPort, "SSH port")
+	flags.StringVar(&cfg.StateDir, "state-dir", cfg.StateDir, "package state directory")
+	flags.StringVar(&cfg.TargetID, "target-id", cfg.TargetID, "stable package state target identifier")
+}
+
+func promptDistributionResetConfig(cmd *cobra.Command, cfg *cloudinstall.Config) error {
+	var err error
+	if !cmd.Flags().Changed("masters") && strings.TrimSpace(cfg.Masters) == "" {
+		cfg.Masters, err = promptValue("Master nodes (comma-separated)", cfg.Masters, true, false)
+		if err != nil {
+			return err
+		}
+	}
+	if !cmd.Flags().Changed("nodes") && strings.TrimSpace(cfg.Nodes) == "" {
+		cfg.Nodes, err = promptValue("Worker nodes (comma-separated, optional)", cfg.Nodes, false, false)
+		if err != nil {
+			return err
+		}
+	}
+	if !cmd.Flags().Changed("user") && strings.TrimSpace(cfg.User) == "" {
+		cfg.User, err = promptValue("SSH user", cfg.User, true, false)
+		if err != nil {
+			return err
+		}
+	}
+	if !cmd.Flags().Changed("ssh-key") && strings.TrimSpace(cfg.SSHKey) == "" {
+		cfg.SSHKey, err = promptValue("SSH private key", cfg.SSHKey, false, false)
+		if err != nil {
+			return err
+		}
+	}
+	if !cmd.Flags().Changed("ssh-password") {
+		cfg.SSHPassword, err = promptValue("SSH password (optional)", cfg.SSHPassword, false, true)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateResetTarget(state *distribution.State, clusterName string) error {
+	if state == nil {
+		return errors.New("distribution target state is nil")
+	}
+	if state.Target.Cluster != "" && state.Target.Cluster != clusterName {
+		return fmt.Errorf("reset cluster %q does not match recorded cluster %q", clusterName, state.Target.Cluster)
+	}
+	return nil
 }

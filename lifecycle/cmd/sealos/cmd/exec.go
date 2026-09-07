@@ -48,6 +48,7 @@ func newExecCmd() *cobra.Command {
 		ips           []string
 		cluster       *v2.Cluster
 		captureOutput bool
+		sshOverride   = &v2.SSH{}
 	)
 	var execCmd = &cobra.Command{
 		Use:     "exec",
@@ -63,6 +64,12 @@ func newExecCmd() *cobra.Command {
 		},
 		PreRunE: func(cmd *cobra.Command, args []string) (err error) {
 			cluster, err = clusterfile.GetClusterFromName(clusterName)
+			if err != nil {
+				return err
+			}
+			if cmd.Flags().Changed("user") || cmd.Flags().Changed("passwd") || cmd.Flags().Changed("pk") || cmd.Flags().Changed("pk-passwd") || cmd.Flags().Changed("port") {
+				ssh.OverSSHConfig(&cluster.Spec.SSH, sshOverride)
+			}
 			return
 		},
 	}
@@ -70,6 +77,11 @@ func newExecCmd() *cobra.Command {
 	execCmd.Flags().StringSliceVarP(&roles, "roles", "r", []string{}, "run command on nodes with role")
 	execCmd.Flags().StringSliceVar(&ips, "ips", []string{}, "run command on nodes with ip address")
 	execCmd.Flags().BoolVar(&captureOutput, "capture-output", false, "capture remote command output for callers")
+	execCmd.Flags().StringVar(&sshOverride.User, "user", "", "username to authenticate as")
+	execCmd.Flags().StringVar(&sshOverride.Passwd, "passwd", "", "use given password to authenticate with")
+	execCmd.Flags().StringVar(&sshOverride.Pk, "pk", "", "private key path to authenticate with")
+	execCmd.Flags().StringVar(&sshOverride.PkPasswd, "pk-passwd", "", "private key passphrase")
+	execCmd.Flags().Uint16Var(&sshOverride.Port, "port", 0, "SSH port")
 	return execCmd
 }
 

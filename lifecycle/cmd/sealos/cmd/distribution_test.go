@@ -52,6 +52,7 @@ func TestDistributionInstallDryRun(t *testing.T) {
 		"cloud@v5.1.0",
 		"--interactive=false",
 		"--masters", "192.0.2.10:22",
+		"--cluster", "prod",
 		"--cloud-domain", "192.0.2.10.nip.io",
 		"--dry-run",
 		"--config-dir", "/tmp/sealos-cli-install-test",
@@ -62,6 +63,7 @@ func TestDistributionInstallDryRun(t *testing.T) {
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, output.String(), "Sealos Cloud installation completed")
 	require.Contains(t, output.String(), "sealos-finish:v0.1.0")
+	require.Contains(t, output.String(), "--cluster prod")
 }
 
 var testDistributionImages = []string{

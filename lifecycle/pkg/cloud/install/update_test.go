@@ -48,6 +48,15 @@ func TestInstallIncrementalPackageRunsStandaloneImage(t *testing.T) {
 	}, runner.commands)
 }
 
+func TestClusterNameIsPassedToPackageCommands(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.ClusterName = "prod"
+	installer := Installer{Config: cfg}
+
+	command := installer.runImage("ghcr.io/example/demo:v1")
+	require.Equal(t, "sealos run --force ghcr.io/example/demo:v1 --cluster prod", command.String())
+}
+
 func TestInstallIncrementalPackageRejectsBootstrapPackage(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Masters = "192.0.2.10"
@@ -60,12 +69,33 @@ func TestInstallIncrementalPackageRejectsBootstrapPackage(t *testing.T) {
 	require.ErrorIs(t, err, ErrIncrementalPackageUnsupported)
 }
 
+func TestResetRunsDistributionCleanupBeforeLegacyReset(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := DefaultConfig()
+	cfg.Masters = "192.0.2.10"
+	cfg.Nodes = "192.0.2.11"
+	cfg.User = "root"
+	cfg.SSHKey = "/root/.ssh/id_rsa"
+	installer := Installer{Config: cfg, Runner: runner}
+
+	require.NoError(t, installer.Reset(context.Background(), "default"))
+	require.Equal(t, []string{
+		"sealos exec --cluster default --user root --pk /root/.ssh/id_rsa --port 22 --roles master --capture-output 'rm -rf -- /root/.sealos/cloud'",
+		"sealos reset --cluster default --force --user root --pk /root/.ssh/id_rsa --port 22",
+	}, runner.commands)
+}
+
+func TestValidateResetRequiresMasterNodes(t *testing.T) {
+	cfg := DefaultConfig()
+	require.ErrorContains(t, cfg.ValidateReset(), "masters are required")
+}
+
 func TestRecordInstalledState(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Masters = "192.0.2.10"
 	cfg.CloudDomain = "cloud.example.com"
+	cfg.ClusterName = "prod"
 	cfg.StateDir = t.TempDir()
-	cfg.TargetID = "target-a"
 	installer := Installer{Config: cfg}
 	manifest := &distribution.Manifest{
 		Name:    "cloud",
@@ -75,11 +105,12 @@ func TestRecordInstalledState(t *testing.T) {
 		}},
 	}
 	require.NoError(t, installer.recordInstalledState(context.Background(), manifest))
-	store, err := distribution.NewStateStore(cfg.StateDir, cfg.TargetID)
+	store, err := distribution.NewStateStore(cfg.StateDir, cfg.ClusterName)
 	require.NoError(t, err)
 	state, err := store.Load()
 	require.NoError(t, err)
 	require.Equal(t, "cloud@v1.0.0", state.Distribution)
+	require.Equal(t, "prod", state.Target.Cluster)
 	require.Equal(t, []string{"demo@v1.0.0"}, []string{state.Packages[0].Ref()})
 }
 

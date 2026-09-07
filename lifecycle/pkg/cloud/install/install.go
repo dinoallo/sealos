@@ -136,6 +136,7 @@ type Config struct {
 	SourceRoot       string
 	SourceCache      string
 	StateDir         string
+	ClusterName      string
 	TargetID         string
 	RepositoryCommit string
 	Masters          string
@@ -168,6 +169,19 @@ type Config struct {
 	WaitTimeout time.Duration
 }
 
+func (c Config) ValidateReset() error {
+	if strings.TrimSpace(c.Masters) == "" {
+		return errors.New("masters are required")
+	}
+	if strings.TrimSpace(c.User) == "" {
+		return errors.New("SSH user is required")
+	}
+	if c.SSHPort == 0 {
+		return errors.New("SSH port must be greater than zero")
+	}
+	return nil
+}
+
 // DefaultConfig returns the defaults used by the native installer.
 func DefaultConfig() Config {
 	home, err := os.UserHomeDir()
@@ -186,6 +200,7 @@ func DefaultConfig() Config {
 		SourceRoot:           currentDirectory(),
 		SourceCache:          distribution.DefaultSourceCache(),
 		StateDir:             distribution.DefaultPackageStateDir,
+		ClusterName:          "default",
 		CloudPort:            DefaultCloudPort,
 		MaxPods:              120,
 		OpenEBSStorage:       "/var/openebs",
@@ -254,6 +269,7 @@ func ConfigFromEnv(lookup func(string) (string, bool)) Config {
 	setString("SEALOS_V2_SOURCE_ROOT", &cfg.SourceRoot)
 	setString("SEALOS_V2_SOURCE_CACHE", &cfg.SourceCache)
 	setString("SEALOS_PACKAGE_STATE_DIR", &cfg.StateDir)
+	setString("SEALOS_PACKAGE_CLUSTER", &cfg.ClusterName)
 	setString("SEALOS_PACKAGE_TARGET_ID", &cfg.TargetID)
 	setString("SEALOS_V2_MASTERS", &cfg.Masters)
 	setString("SEALOS_V2_NODES", &cfg.Nodes)
@@ -315,6 +331,9 @@ func (c Config) Validate() error {
 	}
 	if strings.TrimSpace(c.StateDir) == "" {
 		return errors.New("package state directory is required")
+	}
+	if strings.TrimSpace(c.ClusterName) == "" || filepath.Base(c.ClusterName) != c.ClusterName || c.ClusterName == "." || c.ClusterName == ".." {
+		return fmt.Errorf("cluster name or ID %q is invalid", c.ClusterName)
 	}
 	if (c.CertPath == "") != (c.KeyPath == "") {
 		return errors.New("cert path and key path must be provided together")
@@ -753,6 +772,66 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	return i.recordInstalledState(ctx, manifest)
 }
 
+// Reset reuses the legacy cluster reset implementation after removing the
+// distribution-specific runtime files that are outside the legacy Clusterfile
+// cleanup path.
+func (i *Installer) Reset(ctx context.Context, clusterName string) error {
+	if err := i.Config.ValidateReset(); err != nil {
+		return err
+	}
+	if i.Runner == nil {
+		return errors.New("installer command runner is nil")
+	}
+	if i.Stdout == nil {
+		i.Stdout = io.Discard
+	}
+	if err := i.run(ctx, i.distributionRuntimeCleanupCommand(clusterName)); err != nil {
+		return fmt.Errorf("clean distribution runtime: %w", err)
+	}
+	if err := i.run(ctx, i.legacyResetCommand(clusterName)); err != nil {
+		return fmt.Errorf("reset cluster: %w", err)
+	}
+	return nil
+}
+
+func (i *Installer) distributionRuntimeCleanupCommand(clusterName string) Command {
+	args := []string{"exec", "--cluster", clusterName}
+	appendArg := func(name, value string) {
+		if strings.TrimSpace(value) != "" {
+			args = append(args, name, value)
+		}
+	}
+	appendArg("--user", i.Config.User)
+	appendArg("--passwd", i.Config.SSHPassword)
+	appendArg("--pk", i.Config.SSHKey)
+	appendArg("--pk-passwd", i.Config.SSHKeyPasswd)
+	if i.Config.SSHPort != 0 {
+		args = append(args, "--port", strconv.Itoa(int(i.Config.SSHPort)))
+	}
+	args = append(args, "--roles", "master", "--capture-output", "rm -rf -- /root/.sealos/cloud")
+	return Command{
+		Name: "sealos",
+		Args: args,
+	}
+}
+
+func (i *Installer) legacyResetCommand(clusterName string) Command {
+	args := []string{"reset", "--cluster", clusterName, "--force"}
+	appendArg := func(name, value string) {
+		if strings.TrimSpace(value) != "" {
+			args = append(args, name, value)
+		}
+	}
+	appendArg("--user", i.Config.User)
+	appendArg("--passwd", i.Config.SSHPassword)
+	appendArg("--pk", i.Config.SSHKey)
+	appendArg("--pk-passwd", i.Config.SSHKeyPasswd)
+	if i.Config.SSHPort != 0 {
+		args = append(args, "--port", strconv.Itoa(int(i.Config.SSHPort)))
+	}
+	return Command{Name: "sealos", Args: args}
+}
+
 func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution.Manifest, workDir string) error {
 	resolved, err := distribution.ResolvePackages(manifest, distribution.ResolveOptions{
 		Mode:        i.Config.PackageMode,
@@ -879,7 +958,9 @@ mv "$values_tmp" "$root/values/global.yaml"
 if [ ! -x "$root/bin/yq" ] && command -v yq >/dev/null 2>&1; then
   ln -s "$(command -v yq)" "$root/bin/yq"
 fi`, shellQuote(cloudRuntimeRoot), tools, values)
-	return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", script}}
+	args := i.withCluster([]string{"exec"})
+	args = append(args, "--roles", "master", script)
+	return Command{Name: "sealos", Args: args}
 }
 
 func (i *Installer) cloudRuntimeToolsContent() []byte {
@@ -1171,9 +1252,11 @@ func (i *Installer) waitClusterReady(ctx context.Context) error {
 
 func (i *Installer) clusterStatusCommand() Command {
 	if strings.TrimSpace(i.Config.Masters) != "" {
-		return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", "--capture-output", "kubectl get nodes --no-headers"}}
+		args := i.withCluster([]string{"exec"})
+		args = append(args, "--roles", "master", "--capture-output", "kubectl get nodes --no-headers")
+		return Command{Name: "sealos", Args: args}
 	}
-	kubeconfig := constants.NewPathResolver("default").AdminFile()
+	kubeconfig := constants.NewPathResolver(clusterName(i.Config)).AdminFile()
 	return Command{Name: "kubectl", Args: []string{"--kubeconfig", kubeconfig, "get", "nodes", "--no-headers"}}
 }
 
@@ -1186,7 +1269,9 @@ func (i *Installer) kubectlCommand(args ...string) Command {
 	for _, arg := range args {
 		parts = append(parts, shellQuote(arg))
 	}
-	return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", "--capture-output", strings.Join(parts, " ")}}
+	execArgs := i.withCluster([]string{"exec"})
+	execArgs = append(execArgs, "--roles", "master", "--capture-output", strings.Join(parts, " "))
+	return Command{Name: "sealos", Args: execArgs}
 }
 
 func nodesReady(output []byte) bool {
@@ -1204,6 +1289,7 @@ func nodesReady(output []byte) bool {
 
 func (i *Installer) kubernetesCommand(image string) Command {
 	args := []string{"run", "--force", image}
+	args = i.withCluster(args)
 	appendArg := func(name, value string) {
 		if value != "" {
 			args = append(args, name, value)
@@ -1315,7 +1401,9 @@ else
 	' "$manifest" > "$tmp"
 fi
 cp "$tmp" "$manifest"`, value)
-	return Command{Name: "sealos", Args: []string{"exec", "--roles", "master", script}}
+	args := i.withCluster([]string{"exec"})
+	args = append(args, "--roles", "master", script)
+	return Command{Name: "sealos", Args: args}
 }
 
 func (i *Installer) waitForAPIServer(ctx context.Context) error {
@@ -1339,6 +1427,7 @@ func (i *Installer) imageWithEnv(image, key, value string) Command {
 
 func (i *Installer) imageWithEnvs(image string, env map[string]string) Command {
 	args := []string{"run", "--force", image}
+	args = i.withCluster(args)
 	keys := make([]string, 0, len(env))
 	for key := range env {
 		keys = append(keys, key)
@@ -1351,7 +1440,18 @@ func (i *Installer) imageWithEnvs(image string, env map[string]string) Command {
 }
 
 func (i *Installer) runImage(image string) Command {
-	return Command{Name: "sealos", Args: []string{"run", "--force", image}}
+	return Command{Name: "sealos", Args: i.withCluster([]string{"run", "--force", image})}
+}
+
+func (i *Installer) withCluster(args []string) []string {
+	if i == nil {
+		return args
+	}
+	name := strings.TrimSpace(i.Config.ClusterName)
+	if name == "" || name == "default" {
+		return args
+	}
+	return append(args, "--cluster", name)
 }
 
 type cloudConfig struct {

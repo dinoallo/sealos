@@ -122,6 +122,13 @@ func (i *Installer) recordInstalledState(ctx context.Context, manifest *distribu
 	}
 	defer unlock()
 	state := &distribution.State{
+		Target: distribution.TargetMetadata{
+			Cluster: clusterName(i.Config),
+			Masters: i.Config.Masters,
+			Nodes:   i.Config.Nodes,
+			User:    i.Config.User,
+			SSHPort: i.Config.SSHPort,
+		},
 		Distribution:        manifest.Ref(),
 		ManifestFingerprint: manifest.Fingerprint(),
 		RepositoryCommit:    i.Config.RepositoryCommit,
@@ -136,9 +143,16 @@ func (i *Installer) recordInstalledState(ctx context.Context, manifest *distribu
 func (i *Installer) stateStore() (*distribution.StateStore, error) {
 	targetID := strings.TrimSpace(i.Config.TargetID)
 	if targetID == "" {
-		targetID = distribution.TargetID(i.Config.Masters, i.Config.SSHPort)
+		targetID = clusterName(i.Config)
 	}
 	return distribution.NewStateStore(i.Config.StateDir, targetID)
+}
+
+func clusterName(cfg Config) string {
+	if name := strings.TrimSpace(cfg.ClusterName); name != "" {
+		return name
+	}
+	return "default"
 }
 
 // InstalledPackages returns the package set that the Cloud installer actually
