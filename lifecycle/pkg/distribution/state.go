@@ -45,16 +45,24 @@ const (
 
 var ErrPackageStateNotFound = errors.New("package state not found")
 
+type CleanupHook struct {
+	Path     string `json:"path"`
+	Artifact string `json:"artifact"`
+}
+
 // InstalledPackage describes the package artifact recorded by the package
 // manager after a successful installation or explicit adoption.
 type InstalledPackage struct {
-	Name        string      `json:"name"`
-	Version     string      `json:"version"`
-	Fingerprint string      `json:"fingerprint"`
-	Image       string      `json:"image,omitempty"`
-	Mode        ResolveMode `json:"mode,omitempty"`
-	Status      string      `json:"status"`
-	InstalledAt time.Time   `json:"installedAt"`
+	Name        string       `json:"name"`
+	Version     string       `json:"version"`
+	Fingerprint string       `json:"fingerprint"`
+	Image       string       `json:"image,omitempty"`
+	DependsOn   []string     `json:"dependsOn,omitempty"`
+	Cleanup     *CleanupHook `json:"cleanup,omitempty"`
+	CleanupDone bool         `json:"cleanupDone,omitempty"`
+	Mode        ResolveMode  `json:"mode,omitempty"`
+	Status      string       `json:"status"`
+	InstalledAt time.Time    `json:"installedAt"`
 }
 
 // TargetMetadata contains the non-sensitive connection data needed to manage
@@ -72,7 +80,10 @@ func (p InstalledPackage) Ref() string {
 	return p.Name + "@" + p.Version
 }
 
-func NewInstalledPackage(pkg Package, image string, mode ResolveMode, status string) InstalledPackage {
+// NewInstalledPackage creates state for a package. Dependencies must be the
+// exact refs produced by distribution resolution; manifest slot constraints
+// must not be persisted in package state.
+func NewInstalledPackage(pkg Package, image string, mode ResolveMode, status string, dependencies ...string) InstalledPackage {
 	if status == "" {
 		status = PackageStatusInstalled
 	}
@@ -81,6 +92,7 @@ func NewInstalledPackage(pkg Package, image string, mode ResolveMode, status str
 		Version:     pkg.Version,
 		Fingerprint: pkg.Fingerprint(),
 		Image:       image,
+		DependsOn:   append([]string(nil), dependencies...),
 		Mode:        mode,
 		Status:      status,
 		InstalledAt: time.Now().UTC(),
@@ -251,6 +263,79 @@ func (s *StateStore) Save(state *State) error {
 	return writeJSONAtomically(s.statePath(), state)
 }
 
+// SaveCleanupArtifact stores a package cleanup script below the target state
+// directory and returns the relative artifact path persisted in State.
+func (s *StateStore) SaveCleanupArtifact(packageRef string, script []byte) (string, error) {
+	if s == nil {
+		return "", errors.New("state store is nil")
+	}
+	if strings.TrimSpace(packageRef) == "" {
+		return "", errors.New("package reference is required")
+	}
+	if len(script) == 0 {
+		return "", errors.New("package cleanup script is empty")
+	}
+	name := fingerprint(packageRef)[len("sha256:"):]
+	relative := filepath.ToSlash(filepath.Join("cleanup", name+".sh"))
+	path, err := s.artifactPath(relative)
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		return "", fmt.Errorf("create package cleanup directory: %w", err)
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".cleanup-*")
+	if err != nil {
+		return "", fmt.Errorf("create package cleanup artifact: %w", err)
+	}
+	temporaryName := temporary.Name()
+	defer os.Remove(temporaryName)
+	if err := temporary.Chmod(0o700); err != nil {
+		_ = temporary.Close()
+		return "", fmt.Errorf("set package cleanup artifact permissions: %w", err)
+	}
+	if _, err := temporary.Write(script); err != nil {
+		_ = temporary.Close()
+		return "", fmt.Errorf("write package cleanup artifact: %w", err)
+	}
+	if err := temporary.Close(); err != nil {
+		return "", fmt.Errorf("close package cleanup artifact: %w", err)
+	}
+	if err := os.Rename(temporaryName, path); err != nil {
+		return "", fmt.Errorf("save package cleanup artifact: %w", err)
+	}
+	return relative, nil
+}
+
+func (s *StateStore) ReadCleanupArtifact(hook CleanupHook) ([]byte, error) {
+	if s == nil {
+		return nil, errors.New("state store is nil")
+	}
+	path, err := s.artifactPath(hook.Artifact)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("package cleanup artifact %q not found", hook.Artifact)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read package cleanup artifact: %w", err)
+	}
+	return data, nil
+}
+
+func (s *StateStore) artifactPath(relative string) (string, error) {
+	if strings.TrimSpace(relative) == "" || filepath.IsAbs(relative) {
+		return "", fmt.Errorf("invalid package cleanup artifact path %q", relative)
+	}
+	clean := filepath.Clean(filepath.FromSlash(relative))
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.ToSlash(clean) != relative {
+		return "", fmt.Errorf("invalid package cleanup artifact path %q", relative)
+	}
+	return filepath.Join(s.targetDir(), clean), nil
+}
+
 // Remove deletes all local package state for this target. It must only be
 // called after the remote reset has completed successfully.
 func (s *StateStore) Remove() error {
@@ -345,8 +430,73 @@ func validateState(state *State, targetID string) error {
 			return fmt.Errorf("package state contains duplicate package %q", pkg.Name)
 		}
 		seen[pkg.Name] = struct{}{}
+		if pkg.Cleanup == nil {
+			continue
+		}
+		if err := ValidateCleanupPath(pkg.Cleanup.Path); err != nil {
+			return fmt.Errorf("package state cleanup for %s: %w", pkg.Ref(), err)
+		}
+		if _, err := (&StateStore{Root: "", TargetID: targetID}).artifactPath(pkg.Cleanup.Artifact); err != nil {
+			return fmt.Errorf("package state cleanup for %s: %w", pkg.Ref(), err)
+		}
 	}
 	return nil
+}
+
+// OrderInstalledPackages returns a stable dependency-aware order for package
+// state. It intentionally accepts missing dependsOn values as no dependency so
+// older or manually adopted state remains usable.
+func OrderInstalledPackages(packages []InstalledPackage) ([]InstalledPackage, error) {
+	byRef := make(map[string]int, len(packages))
+	for index, pkg := range packages {
+		byRef[pkg.Ref()] = index
+	}
+	indegree := make([]int, len(packages))
+	dependents := make([][]int, len(packages))
+	for index, pkg := range packages {
+		seen := make(map[string]struct{}, len(pkg.DependsOn))
+		for _, dependency := range pkg.DependsOn {
+			dependency = strings.TrimSpace(dependency)
+			if dependency == "" {
+				return nil, fmt.Errorf("package %s has an empty dependency", pkg.Ref())
+			}
+			if _, ok := seen[dependency]; ok {
+				return nil, fmt.Errorf("package %s contains duplicate dependency %q", pkg.Ref(), dependency)
+			}
+			seen[dependency] = struct{}{}
+			dependencyIndex, ok := byRef[dependency]
+			if !ok {
+				return nil, fmt.Errorf("package %s depends on missing package %q", pkg.Ref(), dependency)
+			}
+			if dependencyIndex == index {
+				return nil, fmt.Errorf("package %s cannot depend on itself", pkg.Ref())
+			}
+			indegree[index]++
+			dependents[dependencyIndex] = append(dependents[dependencyIndex], index)
+		}
+	}
+	ready := make([]int, 0, len(packages))
+	for index, degree := range indegree {
+		if degree == 0 {
+			ready = append(ready, index)
+		}
+	}
+	ordered := make([]InstalledPackage, 0, len(packages))
+	for len(ready) > 0 {
+		index := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, packages[index])
+		for _, dependent := range dependents[index] {
+			indegree[dependent]--
+			if indegree[dependent] == 0 {
+				insertStableIndex(&ready, dependent)
+			}
+		}
+	}
+	if len(ordered) != len(packages) {
+		return nil, errors.New("package dependency cycle detected in package state")
+	}
+	return ordered, nil
 }
 
 func writeJSONAtomically(path string, value interface{}) error {

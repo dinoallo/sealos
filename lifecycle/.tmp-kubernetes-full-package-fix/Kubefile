@@ -1,0 +1,10 @@
+FROM 192.168.128.126:5000/sealos-apps/sealos-pro:kubernetes-v1.28.15
+
+LABEL init="bash opt/sealos/package-init.sh"
+LABEL sealos.io/package-clean="/opt/sealos/package-clean.sh"
+
+COPY package-init.sh /opt/sealos/package-init.sh
+COPY package-clean.sh /opt/sealos/package-clean.sh
+COPY image-cri-shim.service /opt/sealos/package-assets/image-cri-shim.service
+COPY kubelet.service /opt/sealos/package-assets/kubelet.service
+COPY 10-kubeadm.conf /opt/sealos/package-assets/10-kubeadm.conf

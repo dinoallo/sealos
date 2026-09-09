@@ -807,7 +807,11 @@ func applyDistributionUpdate(cmd *cobra.Command, cfg cloudinstall.Config, ref st
 		if err := store.SaveTransaction(transaction); err != nil {
 			return err
 		}
-		upsertInstalledPackage(state, item, cfg.PackageMode)
+		installed, err := installer.InstalledPackage(item, cfg.PackageMode, store)
+		if err != nil {
+			return err
+		}
+		upsertInstalledPackage(state, installed)
 		if err := store.Save(state); err != nil {
 			return fmt.Errorf("save package state after %s: %w", item.Package.Ref(), err)
 		}
@@ -828,8 +832,7 @@ func applyDistributionUpdate(cmd *cobra.Command, cfg cloudinstall.Config, ref st
 	return nil
 }
 
-func upsertInstalledPackage(state *distribution.State, item distribution.ResolvedPackage, mode distribution.ResolveMode) {
-	installed := distribution.NewInstalledPackage(item.Package, item.Image, mode, distribution.PackageStatusInstalled)
+func upsertInstalledPackage(state *distribution.State, installed distribution.InstalledPackage) {
 	for index := range state.Packages {
 		if state.Packages[index].Name == installed.Name {
 			state.Packages[index] = installed
@@ -977,6 +980,10 @@ func newDistributionResetCmd() *cobra.Command {
 			if err := validateResetTarget(state, clusterName); err != nil {
 				return err
 			}
+			if strings.TrimSpace(cfg.TargetID) == "" {
+				cfg.TargetID = store.TargetID
+			}
+			cfg.ClusterName = clusterName
 			if !force && !cfg.DryRun {
 				confirm := promptui.Select{
 					Label:     fmt.Sprintf("Reset distribution cluster %s", clusterName),

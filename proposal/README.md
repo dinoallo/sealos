@@ -47,6 +47,11 @@ After the proposal is accepted, implementation work proceeds goes on.
 
 1. [Global YAML Usage Convention](design/en/global-yaml-usage-convention.md) ([中文](design/zh/global-yaml-usage-convention.zh.md))
 
+### Proposals
+
+1. [Optional Package Cleanup Hooks](package-cleanup-hooks.md) ([中文](design/zh/package-cleanup-hooks.md))
+2. [Package Slot Dependencies](package-slot-dependencies.md) ([中文](design/zh/package-slot-dependencies.md))
+
 ### Help
 
 As proposal process is just from a starter stage, if something is missing or not cleared here, feel free to open new issues to discuss the proposal process1

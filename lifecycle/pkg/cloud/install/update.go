@@ -121,6 +121,15 @@ func (i *Installer) recordInstalledState(ctx context.Context, manifest *distribu
 		return err
 	}
 	defer unlock()
+	for index := range packages {
+		if artifact, ok := i.cleanupArtifactForImage(packages[index].Image); ok {
+			relative, err := store.SaveCleanupArtifact(packages[index].Ref(), artifact.Script)
+			if err != nil {
+				return fmt.Errorf("save cleanup hook for %s: %w", packages[index].Ref(), err)
+			}
+			packages[index].Cleanup = &distribution.CleanupHook{Path: artifact.Path, Artifact: relative}
+		}
+	}
 	state := &distribution.State{
 		Target: distribution.TargetMetadata{
 			Cluster: clusterName(i.Config),
@@ -138,6 +147,26 @@ func (i *Installer) recordInstalledState(ctx context.Context, manifest *distribu
 		return fmt.Errorf("save package state: %w", err)
 	}
 	return nil
+}
+
+// InstalledPackage returns state for one package and persists its cleanup
+// artifact when the package image declares a cleanup hook. The caller must
+// hold the StateStore lock while calling this method.
+func (i *Installer) InstalledPackage(item distribution.ResolvedPackage, mode distribution.ResolveMode, store *distribution.StateStore) (distribution.InstalledPackage, error) {
+	installed := distribution.NewInstalledPackage(item.Package, item.Image, mode, distribution.PackageStatusInstalled, item.Dependencies...)
+	artifact, ok := i.cleanupArtifactForImage(item.Image)
+	if !ok {
+		return installed, nil
+	}
+	if store == nil {
+		return distribution.InstalledPackage{}, errors.New("package state store is nil")
+	}
+	relative, err := store.SaveCleanupArtifact(installed.Ref(), artifact.Script)
+	if err != nil {
+		return distribution.InstalledPackage{}, fmt.Errorf("save cleanup hook for %s: %w", installed.Ref(), err)
+	}
+	installed.Cleanup = &distribution.CleanupHook{Path: artifact.Path, Artifact: relative}
+	return installed, nil
 }
 
 func (i *Installer) stateStore() (*distribution.StateStore, error) {
@@ -170,7 +199,7 @@ func InstalledPackages(manifest *distribution.Manifest, mode distribution.Resolv
 			return nil, fmt.Errorf("distribution %s contains duplicate installed package name %q", manifest.Ref(), item.Package.Name)
 		}
 		seen[item.Package.Name] = struct{}{}
-		packages = append(packages, distribution.NewInstalledPackage(item.Package, item.Image, mode, distribution.PackageStatusInstalled))
+		packages = append(packages, distribution.NewInstalledPackage(item.Package, item.Image, mode, distribution.PackageStatusInstalled, item.Dependencies...))
 	}
 	return packages, nil
 }

@@ -23,7 +23,7 @@ func TestSyncRepositoryFromLocalGitCheckout(t *testing.T) {
 	source := t.TempDir()
 	manifestDir := filepath.Join(source, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\nimages:\n  - ghcr.io/example/cloud:v1.0.0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\npackages:\n  - name: cloud\n    version: v1.0.0\n    remote:\n      image: ghcr.io/example/cloud:v1.0.0\n"), 0o644))
 	runGitTest(t, source, "init")
 	runGitTest(t, source, "config", "user.email", "test@example.com")
 	runGitTest(t, source, "config", "user.name", "Sealos Test")
@@ -82,7 +82,7 @@ func TestRepositoryListRejectsManifestPathMismatch(t *testing.T) {
 	root := t.TempDir()
 	manifestDir := filepath.Join(root, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: other\nversion: v1.0.0\nimages:\n  - ghcr.io/example/cloud:v1.0.0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: other\nversion: v1.0.0\npackages:\n  - name: cloud\n    version: v1.0.0\n    remote:\n      image: ghcr.io/example/cloud:v1.0.0\n"), 0o644))
 
 	repo, err := OpenLocalRepository(root)
 	require.NoError(t, err)
@@ -94,7 +94,7 @@ func TestRepositoryLoadsYAMLVariant(t *testing.T) {
 	root := t.TempDir()
 	manifestDir := filepath.Join(root, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yml"), []byte("name: cloud\nversion: v1.0.0\nimages:\n  - ghcr.io/example/cloud:v1.0.0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yml"), []byte("name: cloud\nversion: v1.0.0\npackages:\n  - name: cloud\n    version: v1.0.0\n    remote:\n      image: ghcr.io/example/cloud:v1.0.0\n"), 0o644))
 
 	repo, err := OpenLocalRepository(root)
 	require.NoError(t, err)

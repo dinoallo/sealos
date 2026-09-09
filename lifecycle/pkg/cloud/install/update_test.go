@@ -16,6 +16,11 @@ package install
 
 import (
 	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/labring/sealos/pkg/distribution"
@@ -37,7 +42,7 @@ func TestInstallIncrementalPackageRunsStandaloneImage(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Masters = "192.0.2.10"
 	cfg.CloudDomain = "cloud.example.com"
-	installer := Installer{Config: cfg, Runner: runner}
+	installer := Installer{Config: cfg, Runner: runner, Stdout: io.Discard}
 	pkg := distribution.Package{Name: "demo", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/demo:v1"}}
 
 	require.NoError(t, installer.InstallIncrementalPackage(context.Background(), distribution.ResolvedPackage{Package: pkg, Image: pkg.Remote.Reference()}))
@@ -69,20 +74,35 @@ func TestInstallIncrementalPackageRejectsBootstrapPackage(t *testing.T) {
 	require.ErrorIs(t, err, ErrIncrementalPackageUnsupported)
 }
 
-func TestResetRunsDistributionCleanupBeforeLegacyReset(t *testing.T) {
+func TestResetRunsPackageCleanupInReverseDependencyOrder(t *testing.T) {
 	runner := &recordingRunner{}
 	cfg := DefaultConfig()
 	cfg.Masters = "192.0.2.10"
 	cfg.Nodes = "192.0.2.11"
 	cfg.User = "root"
 	cfg.SSHKey = "/root/.ssh/id_rsa"
-	installer := Installer{Config: cfg, Runner: runner}
+	cfg.StateDir = t.TempDir()
+	store, err := distribution.NewStateStore(cfg.StateDir, cfg.ClusterName)
+	require.NoError(t, err)
+	containerdArtifact, err := store.SaveCleanupArtifact("containerd@v1", []byte("#!/bin/sh\ntrue\n"))
+	require.NoError(t, err)
+	kubernetesArtifact, err := store.SaveCleanupArtifact("kubernetes@v1", []byte("#!/bin/sh\ntrue\n"))
+	require.NoError(t, err)
+	require.NoError(t, store.Save(&distribution.State{Packages: []distribution.InstalledPackage{
+		{Name: "containerd", Version: "v1", Cleanup: &distribution.CleanupHook{Path: "/opt/clean.sh", Artifact: containerdArtifact}},
+		{Name: "kubernetes", Version: "v1", DependsOn: []string{"containerd@v1"}, Cleanup: &distribution.CleanupHook{Path: "/opt/clean.sh", Artifact: kubernetesArtifact}},
+	}}))
+	installer := Installer{Config: cfg, Runner: runner, Stdout: io.Discard}
 
-	require.NoError(t, installer.Reset(context.Background(), "default"))
-	require.Equal(t, []string{
-		"sealos exec --cluster default --user root --pk /root/.ssh/id_rsa --port 22 --roles master --capture-output 'rm -rf -- /root/.sealos/cloud'",
-		"sealos reset --cluster default --force --user root --pk /root/.ssh/id_rsa --port 22",
-	}, runner.commands)
+	require.NoError(t, installer.Reset(context.Background(), cfg.ClusterName))
+	require.Len(t, runner.commands, 2)
+	require.Contains(t, runner.commands[0], "SEALOS_PACKAGE_NAME=kubernetes")
+	require.Contains(t, runner.commands[0], "--ips 192.0.2.10,192.0.2.11")
+	require.Contains(t, runner.commands[1], "SEALOS_PACKAGE_NAME=containerd")
+	state, err := store.Load()
+	require.NoError(t, err)
+	require.True(t, state.Packages[0].CleanupDone)
+	require.True(t, state.Packages[1].CleanupDone)
 }
 
 func TestValidateResetRequiresMasterNodes(t *testing.T) {
@@ -114,6 +134,27 @@ func TestRecordInstalledState(t *testing.T) {
 	require.Equal(t, []string{"demo@v1.0.0"}, []string{state.Packages[0].Ref()})
 }
 
+func TestInstalledPackagesPersistsResolvedDependencyRefs(t *testing.T) {
+	manifest := &distribution.Manifest{
+		Name:    "cloud",
+		Version: "v1.0.0",
+		Packages: []distribution.Package{
+			{Name: "application", Version: "v1.0.0", DependsOn: []distribution.PackageDependency{{Slot: "containerd", Version: ">=v1 <v2"}}, Remote: distribution.Remote{Image: "ghcr.io/example/application:v1.0.0"}},
+			{Name: "containerd", Version: "v1.28.15", Remote: distribution.Remote{Image: "ghcr.io/example/containerd:v1.28.15"}},
+		},
+	}
+
+	installed, err := InstalledPackages(manifest, distribution.ResolveRemote, "")
+	require.NoError(t, err)
+	var application distribution.InstalledPackage
+	for _, pkg := range installed {
+		if pkg.Name == "application" {
+			application = pkg
+		}
+	}
+	require.Equal(t, []string{"containerd@v1.28.15"}, application.DependsOn)
+}
+
 func TestResolveInstalledPackagesSelectsOneCiliumCandidate(t *testing.T) {
 	manifest := &distribution.Manifest{
 		Name:    "cloud-pro",
@@ -130,6 +171,73 @@ func TestResolveInstalledPackagesSelectsOneCiliumCandidate(t *testing.T) {
 	require.Equal(t, "v2", resolved[0].Package.Version)
 }
 
+func TestInstallPackageDependenciesUsesDeclaredOrder(t *testing.T) {
+	runner := &recordingRunner{}
+	cfg := DefaultConfig()
+	cfg.Masters = "192.0.2.10"
+	cfg.User = "root"
+	installer := Installer{Config: cfg, Runner: runner, Stdout: io.Discard}
+	resolved := []distribution.ResolvedPackage{
+		{Package: distribution.Package{Name: "containerd", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/containerd:v1"}}, Image: "ghcr.io/example/containerd:v1"},
+		{Package: distribution.Package{Name: "kubernetes", Version: "v1", DependsOn: []distribution.PackageDependency{{Slot: "containerd", Version: "v1"}}, Remote: distribution.Remote{Image: "ghcr.io/example/kubernetes:v1"}}, Image: "ghcr.io/example/kubernetes:v1", Dependencies: []string{"containerd@v1"}},
+	}
+
+	installed, err := installer.installPackageDependencies(context.Background(), resolved, "kubernetes")
+	require.NoError(t, err)
+	require.Equal(t, map[string]bool{"containerd@v1": true}, installed)
+	require.Len(t, runner.commands, 3)
+	require.Equal(t, "sealos pull -q ghcr.io/example/containerd:v1", runner.commands[0])
+	require.Contains(t, runner.commands[1], "sealos run --package --force ghcr.io/example/containerd:v1")
+	require.Contains(t, runner.commands[1], "--masters 192.0.2.10")
+	require.Equal(t, "sealos rmi --force ghcr.io/example/containerd:v1", runner.commands[2])
+}
+
+func TestCapturePackageCleanupHookExtractsExecutableScript(t *testing.T) {
+	root := t.TempDir()
+	hookPath := filepath.Join(root, "opt", "package-clean.sh")
+	require.NoError(t, os.MkdirAll(filepath.Dir(hookPath), 0o755))
+	require.NoError(t, os.WriteFile(hookPath, []byte("#!/bin/sh\necho cleaned\n"), 0o755))
+	runner := &cleanupMetadataRunner{mountPoint: root}
+	installer := Installer{Config: DefaultConfig(), Runner: runner, Stdout: io.Discard}
+
+	require.NoError(t, installer.capturePackageCleanupHook(context.Background(), "ghcr.io/example/demo:v1"))
+	artifact, ok := installer.cleanupArtifactForImage("ghcr.io/example/demo:v1")
+	require.True(t, ok)
+	require.Equal(t, "/opt/package-clean.sh", artifact.Path)
+	require.Equal(t, "#!/bin/sh\necho cleaned\n", string(artifact.Script))
+	require.Contains(t, runner.commands[0], "sealos create")
+	require.Contains(t, runner.commands[1], "sealos umount")
+	require.Contains(t, runner.commands[2], "sealos rm")
+}
+
+func TestResetContinuesAfterPackageCleanupFailure(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Masters = "192.0.2.10"
+	cfg.User = "root"
+	cfg.StateDir = t.TempDir()
+	store, err := distribution.NewStateStore(cfg.StateDir, cfg.ClusterName)
+	require.NoError(t, err)
+	baseArtifact, err := store.SaveCleanupArtifact("base@v1", []byte("#!/bin/sh\ntrue\n"))
+	require.NoError(t, err)
+	failedArtifact, err := store.SaveCleanupArtifact("failed@v1", []byte("#!/bin/sh\nfalse\n"))
+	require.NoError(t, err)
+	require.NoError(t, store.Save(&distribution.State{Packages: []distribution.InstalledPackage{
+		{Name: "base", Version: "v1", Cleanup: &distribution.CleanupHook{Path: "/opt/clean.sh", Artifact: baseArtifact}},
+		{Name: "failed", Version: "v1", DependsOn: []string{"base@v1"}, Cleanup: &distribution.CleanupHook{Path: "/opt/clean.sh", Artifact: failedArtifact}},
+	}}))
+	runner := &failingCleanupRunner{failOn: "SEALOS_PACKAGE_NAME=failed"}
+	installer := Installer{Config: cfg, Runner: runner, Stdout: io.Discard}
+
+	err = installer.Reset(context.Background(), cfg.ClusterName)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "failed@v1")
+	require.Len(t, runner.commands, 2)
+	state, err := store.Load()
+	require.NoError(t, err)
+	require.False(t, state.Packages[1].CleanupDone)
+	require.True(t, state.Packages[0].CleanupDone)
+}
+
 type recordingRunner struct {
 	commands []string
 }
@@ -141,4 +249,38 @@ func (r *recordingRunner) Run(_ context.Context, command Command) error {
 
 func (r *recordingRunner) Output(context.Context, Command) ([]byte, error) {
 	return []byte(""), nil
+}
+
+type cleanupMetadataRunner struct {
+	commands   []string
+	mountPoint string
+}
+
+type failingCleanupRunner struct {
+	commands []string
+	failOn   string
+}
+
+func (r *failingCleanupRunner) Run(_ context.Context, command Command) error {
+	r.commands = append(r.commands, command.String())
+	if strings.Contains(command.String(), r.failOn) {
+		return errors.New("cleanup failed")
+	}
+	return nil
+}
+
+func (r *failingCleanupRunner) Output(context.Context, Command) ([]byte, error) {
+	return nil, nil
+}
+
+func (r *cleanupMetadataRunner) Run(_ context.Context, command Command) error {
+	r.commands = append(r.commands, command.String())
+	return nil
+}
+
+func (r *cleanupMetadataRunner) Output(_ context.Context, command Command) ([]byte, error) {
+	if len(command.Args) > 0 && command.Args[0] == "inspect" {
+		return []byte(`{"OCIv1":{"Config":{"Labels":{"sealos.io/package-clean":"/opt/package-clean.sh"}}}}`), nil
+	}
+	return []byte(`[{"mountPoint":"` + r.mountPoint + `"}]`), nil
 }

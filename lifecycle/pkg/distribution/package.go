@@ -23,6 +23,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/containers/image/v5/docker/reference"
 	"github.com/opencontainers/go-digest"
 )
@@ -58,6 +59,29 @@ const (
 	SourceGit   SourceType = "git"
 )
 
+const (
+	PackageInitLabel    = "init"
+	PackageCleanupLabel = "sealos.io/package-clean"
+)
+
+// ValidateCleanupPath validates the path declared by PackageCleanupLabel.
+// Cleanup hooks are copied out of an image before it is removed from local
+// storage, so the path must identify a file inside the image rootfs.
+func ValidateCleanupPath(path string) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return errors.New("package cleanup path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		return fmt.Errorf("package cleanup path %q must be absolute", path)
+	}
+	clean := filepath.Clean(path)
+	if clean != path || clean == string(filepath.Separator) || strings.Contains(clean, string(filepath.Separator)+".."+string(filepath.Separator)) || strings.HasSuffix(clean, string(filepath.Separator)+"..") {
+		return fmt.Errorf("package cleanup path %q is invalid", path)
+	}
+	return nil
+}
+
 type Source struct {
 	Type SourceType `json:"type" yaml:"type"`
 	// Path is the package's local source checkout. Absolute paths are package-
@@ -72,11 +96,19 @@ type Source struct {
 	Platforms []string          `json:"platforms,omitempty" yaml:"platforms,omitempty"`
 }
 
+type PackageDependency struct {
+	Slot    string `json:"slot" yaml:"slot"`
+	Version string `json:"version" yaml:"version"`
+}
+
 type Package struct {
 	Name        string `json:"name" yaml:"name"`
 	Version     string `json:"version" yaml:"version"`
 	Description string `json:"description,omitempty" yaml:"description,omitempty"`
 	Remote      Remote `json:"remote" yaml:"remote"`
+	// DependsOn identifies package slots and the SemVer constraints accepted
+	// from the packages selected by the current distribution.
+	DependsOn []PackageDependency `json:"dependsOn,omitempty" yaml:"dependsOn,omitempty"`
 	// Source is the legacy single-source field. New manifests should use
 	// Sources to declare an ordered local-then-git fallback list.
 	Source  *Source  `json:"source,omitempty" yaml:"source,omitempty"`
@@ -128,9 +160,10 @@ type BuildPlan struct {
 }
 
 type ResolvedPackage struct {
-	Package Package
-	Image   string
-	Build   *BuildPlan
+	Package      Package
+	Image        string
+	Dependencies []string
+	Build        *BuildPlan
 }
 
 // DefaultSourceCache returns the persistent cache used for Git package sources.
@@ -158,21 +191,11 @@ func ResolvePackages(manifest *Manifest, options ResolveOptions) ([]ResolvedPack
 		return nil, fmt.Errorf("unsupported package resolution mode %q", options.Mode)
 	}
 
-	if len(manifest.Packages) == 0 {
-		resolved := make([]ResolvedPackage, 0, len(manifest.Images))
-		for index, image := range manifest.Images {
-			resolved = append(resolved, ResolvedPackage{
-				Package: Package{Name: fmt.Sprintf("legacy-%d", index), Version: "legacy", Remote: Remote{Image: image}},
-				Image:   image,
-			})
-		}
-		if options.Mode == ResolveSource {
-			return nil, errors.New("legacy image-only distributions do not support source resolution")
-		}
-		return resolved, nil
+	graph, err := resolvePackageGraph(manifest.Packages)
+	if err != nil {
+		return nil, err
 	}
-
-	resolved := make([]ResolvedPackage, 0, len(manifest.Packages))
+	resolved := make([]ResolvedPackage, 0, len(graph))
 	cleanupBuildPlans := func() {
 		for _, item := range resolved {
 			if item.Build != nil && item.Build.CleanupDir != "" {
@@ -180,24 +203,165 @@ func ResolvePackages(manifest *Manifest, options ResolveOptions) ([]ResolvedPack
 			}
 		}
 	}
-	for _, pkg := range manifest.Packages {
-		item := ResolvedPackage{Package: pkg, Image: pkg.Remote.Reference()}
+	for _, node := range graph {
+		item := ResolvedPackage{
+			Package:      node.Package,
+			Image:        node.Package.Remote.Reference(),
+			Dependencies: append([]string(nil), node.Dependencies...),
+		}
 		if options.Mode == ResolveSource || options.Mode == ResolveHybrid {
-			plan, err := pkg.BuildPlanWithOptions(options)
+			plan, err := node.Package.BuildPlanWithOptions(options)
 			if err != nil {
 				if options.Mode == ResolveHybrid && errors.Is(err, ErrSourceUnavailable) {
 					resolved = append(resolved, item)
 					continue
 				}
 				cleanupBuildPlans()
-				return nil, fmt.Errorf("prepare package %s source: %w", pkg.Ref(), err)
+				return nil, fmt.Errorf("prepare package %s source: %w", node.Package.Ref(), err)
 			}
-			item.Image = pkg.Remote.Image
+			item.Image = node.Package.Remote.Image
 			item.Build = &plan
 		}
 		resolved = append(resolved, item)
 	}
 	return resolved, nil
+}
+
+type packageGraphNode struct {
+	Package      Package
+	Dependencies []string
+}
+
+// resolvePackageGraph resolves slot-based SemVer dependencies against the
+// packages selected by one distribution and returns a stable topological
+// ordering. There is deliberately no catalog lookup or implicit version
+// selection here: every dependency must match exactly one selected package.
+func resolvePackageGraph(packages []Package) ([]packageGraphNode, error) {
+	byRef := make(map[string]int, len(packages))
+	bySlot := make(map[string][]int, len(packages))
+	versions := make([]*semver.Version, len(packages))
+	for index, pkg := range packages {
+		if _, ok := byRef[pkg.Ref()]; ok {
+			return nil, fmt.Errorf("duplicate package %q", pkg.Ref())
+		}
+		byRef[pkg.Ref()] = index
+		bySlot[pkg.Name] = append(bySlot[pkg.Name], index)
+		version, err := semver.NewVersion(strings.TrimSpace(pkg.Version))
+		if err != nil {
+			return nil, fmt.Errorf("package %s has invalid SemVer version %q: %w", pkg.Ref(), pkg.Version, err)
+		}
+		versions[index] = version
+	}
+
+	indegree := make([]int, len(packages))
+	dependents := make([][]int, len(packages))
+	dependencies := make([][]string, len(packages))
+	for index, pkg := range packages {
+		seenSlots := make(map[string]struct{}, len(pkg.DependsOn))
+		for _, dependency := range pkg.DependsOn {
+			slot := strings.TrimSpace(dependency.Slot)
+			constraintText := strings.TrimSpace(dependency.Version)
+			if slot == "" {
+				return nil, fmt.Errorf("package %s has an empty dependency slot", pkg.Ref())
+			}
+			if constraintText == "" {
+				return nil, fmt.Errorf("package %s has an empty version constraint for dependency slot %q", pkg.Ref(), slot)
+			}
+			if _, ok := seenSlots[slot]; ok {
+				return nil, fmt.Errorf("package %s contains duplicate dependency slot %q", pkg.Ref(), slot)
+			}
+			seenSlots[slot] = struct{}{}
+			if slot == pkg.Name {
+				return nil, fmt.Errorf("package %s cannot depend on itself", pkg.Ref())
+			}
+
+			constraint, err := semver.NewConstraint(constraintText)
+			if err != nil {
+				return nil, fmt.Errorf("package %s has invalid version constraint %q for dependency slot %q: %w", pkg.Ref(), constraintText, slot, err)
+			}
+			candidates := bySlot[slot]
+			matches := make([]int, 0, len(candidates))
+			for _, candidate := range candidates {
+				if constraint.Check(versions[candidate]) {
+					matches = append(matches, candidate)
+				}
+			}
+			switch len(matches) {
+			case 0:
+				if len(candidates) == 0 {
+					return nil, fmt.Errorf("package %s depends on missing package slot %q", pkg.Ref(), slot)
+				}
+				return nil, fmt.Errorf("package %s has no selected package in slot %q matching version constraint %q", pkg.Ref(), slot, constraintText)
+			case 1:
+				dependencyIndex := matches[0]
+				dependencyRef := packages[dependencyIndex].Ref()
+				dependencies[index] = append(dependencies[index], dependencyRef)
+				indegree[index]++
+				dependents[dependencyIndex] = append(dependents[dependencyIndex], index)
+			default:
+				refs := make([]string, 0, len(matches))
+				for _, match := range matches {
+					refs = append(refs, packages[match].Ref())
+				}
+				return nil, fmt.Errorf("package %s dependency slot %q with constraint %q matches multiple selected packages: %s", pkg.Ref(), slot, constraintText, strings.Join(refs, ", "))
+			}
+		}
+	}
+
+	ready := make([]int, 0, len(packages))
+	for index, degree := range indegree {
+		if degree == 0 {
+			ready = append(ready, index)
+		}
+	}
+	ordered := make([]packageGraphNode, 0, len(packages))
+	for len(ready) > 0 {
+		index := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, packageGraphNode{
+			Package:      packages[index],
+			Dependencies: dependencies[index],
+		})
+		for _, dependent := range dependents[index] {
+			indegree[dependent]--
+			if indegree[dependent] == 0 {
+				insertStableIndex(&ready, dependent)
+			}
+		}
+	}
+	if len(ordered) != len(packages) {
+		cycle := make([]string, 0)
+		for index, degree := range indegree {
+			if degree > 0 {
+				cycle = append(cycle, packages[index].Ref())
+			}
+		}
+		return nil, fmt.Errorf("package dependency cycle detected: %s", strings.Join(cycle, ", "))
+	}
+	return ordered, nil
+}
+
+// orderPackages returns a stable topological ordering. Packages that are not
+// connected by dependencies retain their manifest order.
+func orderPackages(packages []Package) ([]Package, error) {
+	graph, err := resolvePackageGraph(packages)
+	if err != nil {
+		return nil, err
+	}
+	ordered := make([]Package, 0, len(graph))
+	for _, node := range graph {
+		ordered = append(ordered, node.Package)
+	}
+	return ordered, nil
+}
+
+func insertStableIndex(values *[]int, value int) {
+	items := *values
+	position := sort.SearchInts(items, value)
+	items = append(items, 0)
+	copy(items[position+1:], items[position:])
+	items[position] = value
+	*values = items
 }
 
 func (p Package) Validate() error {
@@ -207,8 +371,35 @@ func (p Package) Validate() error {
 	if strings.TrimSpace(p.Version) == "" {
 		return errors.New("package version is required")
 	}
+	if _, err := semver.NewVersion(strings.TrimSpace(p.Version)); err != nil {
+		return fmt.Errorf("package %s has invalid SemVer version %q: %w", p.Ref(), p.Version, err)
+	}
 	if err := validateRemote(p.Remote); err != nil {
 		return fmt.Errorf("package %s remote: %w", p.Ref(), err)
+	}
+	seenDependencySlots := make(map[string]struct{}, len(p.DependsOn))
+	for _, dependency := range p.DependsOn {
+		slot := strings.TrimSpace(dependency.Slot)
+		if slot == "" {
+			return fmt.Errorf("package %s has an empty dependency slot", p.Ref())
+		}
+		if !validRefComponent(slot) || strings.ContainsRune(slot, '@') {
+			return fmt.Errorf("package %s has invalid dependency slot %q", p.Ref(), dependency.Slot)
+		}
+		if _, ok := seenDependencySlots[slot]; ok {
+			return fmt.Errorf("package %s contains duplicate dependency slot %q", p.Ref(), slot)
+		}
+		seenDependencySlots[slot] = struct{}{}
+		if slot == strings.TrimSpace(p.Name) {
+			return fmt.Errorf("package %s cannot depend on itself", p.Ref())
+		}
+		constraint := strings.TrimSpace(dependency.Version)
+		if constraint == "" {
+			return fmt.Errorf("package %s has an empty version constraint for dependency slot %q", p.Ref(), slot)
+		}
+		if _, err := semver.NewConstraint(constraint); err != nil {
+			return fmt.Errorf("package %s has invalid version constraint %q for dependency slot %q: %w", p.Ref(), constraint, slot, err)
+		}
 	}
 	if p.Source != nil && len(p.Sources) > 0 {
 		return fmt.Errorf("package %s cannot define both source and sources", p.Ref())

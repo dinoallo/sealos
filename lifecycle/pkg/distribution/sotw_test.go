@@ -9,18 +9,15 @@
 package distribution
 
 import (
+	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 )
 
 func TestCloudProRC6SOTWMatchesBundleImageList(t *testing.T) {
-	_, sourceFile, _, ok := runtime.Caller(0)
-	require.True(t, ok)
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", ".."))
-	repo, err := OpenLocalRepository(filepath.Join(repoRoot, "examples", "package-repository"))
+	repo, err := OpenLocalRepository(localPackageRepositoryPath(t))
 	require.NoError(t, err)
 
 	images, err := repo.Resolve("cloud-pro@v5.1.2-rc6")
@@ -65,10 +62,7 @@ func TestCloudProRC6SOTWMatchesBundleImageList(t *testing.T) {
 }
 
 func TestCloudProRC6SOTWSourceRefs(t *testing.T) {
-	_, sourceFile, _, ok := runtime.Caller(0)
-	require.True(t, ok)
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", ".."))
-	repo, err := OpenLocalRepository(filepath.Join(repoRoot, "examples", "package-repository"))
+	repo, err := OpenLocalRepository(localPackageRepositoryPath(t))
 	require.NoError(t, err)
 
 	manifest, err := repo.Load("cloud-pro@v5.1.2-rc6")
@@ -126,4 +120,18 @@ func TestCloudProRC6SOTWSourceRefs(t *testing.T) {
 			require.Nil(t, item.Build, item.Package.Ref())
 		}
 	}
+}
+
+func localPackageRepositoryPath(t *testing.T) string {
+	t.Helper()
+	path := os.Getenv("SEALOS_PACKAGE_REPOSITORY")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+		path = filepath.Join(home, "sealos-package-repository")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("package repository example is unavailable at %s: %v", path, err)
+	}
+	return path
 }

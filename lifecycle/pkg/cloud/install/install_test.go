@@ -21,7 +21,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -76,10 +75,7 @@ func TestSelectCiliumImage(t *testing.T) {
 }
 
 func TestCloudProRC6SOTWIsInstallable(t *testing.T) {
-	_, sourceFile, _, ok := runtime.Caller(0)
-	require.True(t, ok)
-	repoRoot := filepath.Clean(filepath.Join(filepath.Dir(sourceFile), "..", "..", "..", ".."))
-	repo, err := distribution.OpenLocalRepository(filepath.Join(repoRoot, "examples", "package-repository"))
+	repo, err := distribution.OpenLocalRepository(localPackageRepositoryPath(t))
 	require.NoError(t, err)
 	manifest, err := repo.Load("cloud-pro@v5.1.2-rc6")
 	require.NoError(t, err)
@@ -98,6 +94,20 @@ func TestCloudProRC6SOTWIsInstallable(t *testing.T) {
 	}
 	require.Contains(t, output.String(), "sealos run --force ghcr.io/sealos-apps/sealos-pro:cilium-v1.16.9")
 	require.Contains(t, output.String(), "Distribution installation completed with all packages processed")
+}
+
+func localPackageRepositoryPath(t *testing.T) string {
+	t.Helper()
+	path := os.Getenv("SEALOS_PACKAGE_REPOSITORY")
+	if path == "" {
+		home, err := os.UserHomeDir()
+		require.NoError(t, err)
+		path = filepath.Join(home, "sealos-package-repository")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Skipf("package repository example is unavailable at %s: %v", path, err)
+	}
+	return path
 }
 
 func TestConfigValidation(t *testing.T) {
@@ -262,9 +272,9 @@ func TestImageWithEnvsIncludesAllKeys(t *testing.T) {
 
 func TestRewriteProxy(t *testing.T) {
 	images, err := ResolveImages(&distribution.Manifest{
-		Name:    "cloud",
-		Version: "test",
-		Images:  append([]string(nil), testImages...),
+		Name:     "cloud",
+		Version:  "test",
+		Packages: testCloudManifest().Packages,
 	})
 	require.NoError(t, err)
 	images = images.RewriteProxy()
@@ -288,6 +298,13 @@ func TestNodesReadyRequiresAtLeastOneReadyNode(t *testing.T) {
 	require.False(t, nodesReady([]byte("")))
 	require.False(t, nodesReady([]byte("node-a   NotReady   control-plane")))
 	require.True(t, nodesReady([]byte("node-a   Ready   control-plane\nnode-b   Ready   <none>\n")))
+}
+
+func TestDaemonSetReadyRequiresAllDesiredPods(t *testing.T) {
+	require.False(t, daemonSetReady([]byte(`{"status":{"desiredNumberScheduled":0,"numberReady":0}}`)))
+	require.False(t, daemonSetReady([]byte(`{"status":{"desiredNumberScheduled":2,"numberReady":1}}`)))
+	require.True(t, daemonSetReady([]byte(`{"status":{"desiredNumberScheduled":2,"numberReady":2}}`)))
+	require.False(t, daemonSetReady([]byte(`not-json`)))
 }
 
 func TestClusterStatusUsesMasterExecWhenMastersAreConfigured(t *testing.T) {
@@ -356,7 +373,7 @@ func TestInstallBootstrapsNonCloudDistribution(t *testing.T) {
 	var output bytes.Buffer
 	installer := Installer{Config: cfg, Runner: noopRunner{}, Stdout: &output}
 	require.NoError(t, installer.Install(context.Background(), manifest))
-	require.Contains(t, output.String(), "sealos run --force registry.example/kubernetes:v1.28.15")
+	require.Contains(t, output.String(), "sealos run --force --allow-existing-runtime registry.example/kubernetes:v1.28.15")
 	require.Contains(t, output.String(), "sealos run --force registry.example/cilium:v1.16.9")
 	require.Contains(t, output.String(), "sealos pull -q registry.example/cert-manager:v1.19.1")
 	require.Contains(t, output.String(), "sealos run --force registry.example/cert-manager:v1.19.1")
@@ -365,9 +382,10 @@ func TestInstallBootstrapsNonCloudDistribution(t *testing.T) {
 
 func TestInstallRejectsIncompleteCloudPackageSet(t *testing.T) {
 	installer := Installer{Config: DefaultConfig()}
-	err := installer.installDistributionPackages(context.Background(), map[string]string{
-		"sealos-cloud-desktop-frontend": "ghcr.io/example/desktop:v1",
-	})
+	err := installer.installDistributionPackages(context.Background(), []distribution.ResolvedPackage{{
+		Package: distribution.Package{Name: "sealos-cloud-desktop-frontend", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/desktop:v1"}},
+		Image:   "ghcr.io/example/desktop:v1",
+	}}, nil)
 	require.ErrorContains(t, err, `missing Cloud package "sealos-cloud-user-controller"`)
 }
 

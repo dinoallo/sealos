@@ -20,8 +20,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 
 	"github.com/labring/sealos/pkg/constants"
+	"github.com/labring/sealos/pkg/distribution"
 	"github.com/labring/sealos/pkg/registry/helpers"
 	"github.com/labring/sealos/pkg/registry/password"
+	v2 "github.com/labring/sealos/pkg/types/v1beta1"
 	"github.com/labring/sealos/pkg/utils/iputils"
 	"github.com/labring/sealos/pkg/utils/logger"
 )
@@ -32,6 +34,9 @@ type registryApplier struct {
 
 func (*registryApplier) String() string { return "registry_applier" }
 func (*registryApplier) Filter(ctx Context, host string) bool {
+	if packageManagedRootfs(ctx.GetCluster()) {
+		return false
+	}
 	registries := sets.NewString(ctx.GetCluster().GetRegistryIPAndPortList()...)
 	return registries.Has(host)
 }
@@ -58,6 +63,11 @@ func (a *registryApplier) Apply(ctx Context, host string) error {
 
 func (*registryApplier) Undo(ctx Context, host string) error {
 	return ctx.GetExecer().CmdAsync(host, ctx.GetBash().CleanRegistryBash(host))
+}
+
+func packageManagedRootfs(cluster *v2.Cluster) bool {
+	rootfs := cluster.GetRootfsImage()
+	return rootfs != nil && rootfs.Labels != nil && rootfs.Labels[distribution.PackageInitLabel] != ""
 }
 
 type registryHostApplier struct{ common }

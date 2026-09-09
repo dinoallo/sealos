@@ -113,22 +113,22 @@ select a different state root for an isolated environment or test.
 Use `--refresh` to force a repository update or `--offline` to use the existing cache. The repository can be
 overridden with `--repo`, `--repo-ref`, and `--repo-cache`, or with `SEALOS_PACKAGE_REPO`,
 `SEALOS_PACKAGE_REPO_REF`, and `SEALOS_PACKAGE_REPO_CACHE`. The default repository is
-`https://github.com/labring-sigs/sealos-package-repository.git`.
+`https://github.com/dinoallo/sealos-package-repository.git`.
 
 The persistent configuration file is `$XDG_CONFIG_HOME/sealos/config.yaml` or
 `~/.config/sealos/config.yaml`:
 
 ```yaml
 repository:
-  url: https://github.com/labring-sigs/sealos-package-repository.git
+  url: https://github.com/dinoallo/sealos-package-repository.git
   ref: main
 ```
 
 Configuration precedence is CLI flags, environment variables, this file, then built-in defaults. The cache path is
 derived from the repository URL and ref when `cacheDir` is omitted.
 
-A minimal repository layout is available in [`examples/package-repository`](../examples/package-repository/README.md).
-It is documentation-only and can be used as a local repository with `--repo-cache` and `--offline`.
+A minimal repository layout is available at
+`https://github.com/dinoallo/sealos-package-repository.git`.
 
 Use `--interactive=false` with `--masters` and `--cloud-domain` for automation. The legacy
 `scripts/cloud/install-v2.sh` entrypoint remains as a compatibility wrapper and forwards to this command.
@@ -155,29 +155,15 @@ Use it with `sealos distribution install cloud-pro@v5.1.2-rc6 --config install.y
 the file overrides environment variables and built-in defaults. In interactive mode, values supplied by the file are
 not prompted again. Unknown YAML fields and malformed values are rejected.
 
-Each distribution is a self-contained lock manifest. Every package records its remote OCI image, optional digest, and
-ordered local/Git build sources. Updating the package repository therefore does not require updating the Sealos binary,
-while an existing distribution remains reproducible:
+Each distribution selects exact package references from the repository catalog. The package manifest records its remote
+OCI image, optional digest, dependencies, and ordered local/Git build sources. Package versions should be immutable;
+publish a new package version when any of these fields change:
 
 ```yaml
 name: cloud
 version: v5.1.0
 packages:
-  - name: sealos-cloud-user-controller
-    version: v5.1.0
-    remote:
-      image: ghcr.io/labring/sealos-cloud-user-controller:v5.1.0
-      digest: sha256:...
-    sources:
-      - type: local
-        path: /workspace/sealos-cloud-user-controller
-        context: deploy
-        file: Kubefile
-      - type: git
-        url: https://github.com/labring/sealos-cloud-user-controller.git
-        ref: v5.1.0
-        context: deploy
-        file: Kubefile
+  - sealos-cloud-user-controller@v5.1.0
 ```
 
 Remote images are the default resolution mode; source builds are explicit:

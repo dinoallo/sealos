@@ -1,0 +1,16 @@
+[Unit]
+Description=image-cri-shim
+
+[Service]
+ExecStart=/usr/bin/image-cri-shim -f /etc/image-cri-shim.yaml
+Environment=HOME=/root
+Restart=always
+StartLimitInterval=0
+RestartSec=10
+LimitNOFILE=1048576
+LimitNPROC=infinity
+LimitCORE=infinity
+TasksMax=infinity
+
+[Install]
+WantedBy=multi-user.target

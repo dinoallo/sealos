@@ -65,9 +65,11 @@ func (s *SSH) RegisterFlags(fs *pflag.FlagSet) {
 type RunArgs struct {
 	*Cluster
 	*SSH
-	CustomEnv         []string
-	CustomCMD         []string
-	CustomConfigFiles []string
+	CustomEnv            []string
+	CustomCMD            []string
+	CustomConfigFiles    []string
+	Package              bool
+	AllowExistingRuntime bool
 }
 
 func (arg *RunArgs) RegisterFlags(fs *pflag.FlagSet) {
@@ -76,6 +78,8 @@ func (arg *RunArgs) RegisterFlags(fs *pflag.FlagSet) {
 	fs.StringSliceVarP(&arg.CustomEnv, "env", "e", []string{}, "environment variables to be set for images")
 	fs.StringSliceVar(&arg.CustomCMD, "cmd", []string{}, "override CMD directive in images")
 	fs.StringSliceVar(&arg.CustomConfigFiles, "config-file", []string{}, "path of custom config files, to use to replace the resource")
+	fs.BoolVar(&arg.Package, "package", false, "run a standalone Sealos package without initializing Kubernetes")
+	fs.BoolVar(&arg.AllowExistingRuntime, "allow-existing-runtime", false, "allow an existing containerd runtime during Kubernetes bootstrap")
 }
 
 type Args struct {

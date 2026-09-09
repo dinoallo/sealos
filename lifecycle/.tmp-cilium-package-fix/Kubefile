@@ -1,0 +1,3 @@
+FROM 192.168.128.126:5000/dinoallo/sealos-platform/cilium:v1.17.1-helm-fix
+
+COPY package-init.sh /opt/sealos/package-init.sh

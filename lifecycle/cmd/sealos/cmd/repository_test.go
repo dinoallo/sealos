@@ -48,7 +48,7 @@ func TestRepoStatusCommandUsesCacheFlag(t *testing.T) {
 	cache := t.TempDir()
 	manifestDir := filepath.Join(cache, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\nimages:\n  - ghcr.io/example/cloud:v1.0.0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\npackages:\n  - name: cloud\n    version: v1.0.0\n    remote:\n      image: ghcr.io/example/cloud:v1.0.0\n"), 0o644))
 
 	cmd := newRepoStatusCmd()
 	var output bytes.Buffer
@@ -81,7 +81,7 @@ func TestDistributionListUsesRepositoryFlags(t *testing.T) {
 	cache := t.TempDir()
 	manifestDir := filepath.Join(cache, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\nimages:\n  - ghcr.io/example/cloud:v1.0.0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\npackages:\n  - name: cloud\n    version: v1.0.0\n    remote:\n      image: ghcr.io/example/cloud:v1.0.0\n"), 0o644))
 
 	cmd := newDistributionListCmd()
 	var output bytes.Buffer
@@ -107,7 +107,7 @@ func testRepository(t *testing.T) string {
 	root := t.TempDir()
 	manifestDir := filepath.Join(root, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\nimages:\n  - ghcr.io/example/cloud:v1.0.0\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\npackages:\n  - name: cloud\n    version: v1.0.0\n    remote:\n      image: ghcr.io/example/cloud:v1.0.0\n"), 0o644))
 	runRepositoryGit(t, root, "init")
 	runRepositoryGit(t, root, "config", "user.email", "test@example.com")
 	runRepositoryGit(t, root, "config", "user.name", "Sealos Test")

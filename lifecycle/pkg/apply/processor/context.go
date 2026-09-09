@@ -18,9 +18,14 @@ package processor
 
 import "context"
 
+type commandContextKey struct{}
+type envContextKey struct{}
+type allowExistingRuntimeContextKey struct{}
+
 var (
-	commandKey struct{}
-	envKey     struct{}
+	commandKey              commandContextKey
+	envKey                  envContextKey
+	allowExistingRuntimeKey allowExistingRuntimeContextKey
 )
 
 //nolint:staticcheck
@@ -42,9 +47,21 @@ func WithEnvs(ctx context.Context, envs map[string]string) context.Context {
 }
 
 func GetEnvs(ctx context.Context) map[string]string {
-	v := ctx.Value(commandKey)
+	v := ctx.Value(envKey)
 	if v != nil {
 		return v.(map[string]string)
 	}
 	return nil
+}
+
+func WithAllowExistingRuntime(ctx context.Context, allow bool) context.Context {
+	return context.WithValue(ctx, allowExistingRuntimeKey, allow)
+}
+
+func AllowExistingRuntime(ctx context.Context) bool {
+	v := ctx.Value(allowExistingRuntimeKey)
+	if v != nil {
+		return v.(bool)
+	}
+	return false
 }

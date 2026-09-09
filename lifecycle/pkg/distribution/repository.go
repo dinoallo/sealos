@@ -12,6 +12,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -51,6 +52,15 @@ type Repository struct {
 	Root string
 	URL  string
 	Ref  string
+}
+
+// distributionFile is the on-disk representation of a distribution. Package
+// definitions are resolved from the package catalog when the file is loaded.
+type distributionFile struct {
+	Name        string            `json:"name" yaml:"name"`
+	Version     string            `json:"version" yaml:"version"`
+	Description string            `json:"description,omitempty" yaml:"description,omitempty"`
+	Packages    []json.RawMessage `json:"packages" yaml:"packages"`
 }
 
 type RepositoryStatus struct {
@@ -304,13 +314,17 @@ func (r *Repository) Load(ref string) (*Manifest, error) {
 }
 
 func (r *Repository) Show(ref string) (string, error) {
-	manifest, err := r.Load(ref)
+	name, version, err := ParseRef(ref)
 	if err != nil {
 		return "", err
 	}
-	data, err := yaml.Marshal(manifest)
-	if err != nil {
+	filePath := repositoryManifestPath(r.Root, "distributions", name, version)
+	if _, err := r.Load(ref); err != nil {
 		return "", err
+	}
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return "", fmt.Errorf("read distribution manifest %s: %w", filePath, err)
 	}
 	return string(data), nil
 }
@@ -400,9 +414,38 @@ func (r *Repository) loadManifest(filePath string) (*Manifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read distribution manifest %s: %w", filePath, err)
 	}
-	manifest := &Manifest{}
-	if err := yaml.Unmarshal(data, manifest); err != nil {
+	document := distributionFile{}
+	if err := yaml.Unmarshal(data, &document); err != nil {
 		return nil, fmt.Errorf("decode distribution manifest %s: %w", filePath, err)
+	}
+	manifest := &Manifest{
+		Name:        document.Name,
+		Version:     document.Version,
+		Description: document.Description,
+		Packages:    make([]Package, 0, len(document.Packages)),
+	}
+	for index, rawPackage := range document.Packages {
+		var ref string
+		if err := json.Unmarshal(rawPackage, &ref); err == nil {
+			ref = strings.TrimSpace(ref)
+			if _, _, err := ParseRef(ref); err != nil {
+				return nil, fmt.Errorf("resolve distribution manifest %s package %d: %w", filePath, index, err)
+			}
+			pkg, err := r.LoadPackage(ref)
+			if err != nil {
+				return nil, fmt.Errorf("resolve distribution manifest %s package %d %q: %w", filePath, index, ref, err)
+			}
+			manifest.Packages = append(manifest.Packages, *pkg)
+			continue
+		}
+
+		// Keep reading older self-contained manifests so cached repositories can
+		// be upgraded without rewriting every distribution in place.
+		pkg := Package{}
+		if err := json.Unmarshal(rawPackage, &pkg); err != nil {
+			return nil, fmt.Errorf("decode distribution manifest %s package %d: %w", filePath, index, err)
+		}
+		manifest.Packages = append(manifest.Packages, pkg)
 	}
 	if err := manifest.Validate(); err != nil {
 		return nil, fmt.Errorf("validate distribution manifest %s: %w", filePath, err)

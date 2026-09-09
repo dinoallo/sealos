@@ -133,6 +133,10 @@ func (c *defaultChecker) String() string {
 	return "default_checker"
 }
 
+func (*defaultChecker) Filter(ctx Context, _ string) bool {
+	return !packageManagedRootfs(ctx.GetCluster())
+}
+
 func (c *defaultChecker) Apply(ctx Context, host string) error {
 	cmds := []string{ctx.GetBash().CheckBash(host)}
 	return ctx.GetExecer().CmdAsync(host, cmds...)
@@ -141,6 +145,10 @@ func (c *defaultChecker) Apply(ctx Context, host string) error {
 type defaultInitializer struct{ common }
 
 func (*defaultInitializer) String() string { return "initializer" }
+
+func (*defaultInitializer) Filter(ctx Context, _ string) bool {
+	return !packageManagedRootfs(ctx.GetCluster())
+}
 
 func (initializer *defaultInitializer) Apply(ctx Context, host string) error {
 	cmds := []string{ctx.GetBash().InitBash(host)}

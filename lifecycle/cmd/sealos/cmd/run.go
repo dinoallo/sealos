@@ -69,6 +69,13 @@ func newRunCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if runArgs.Package {
+				runner, err := apply.NewPackageRunnerFromArgs(cmd, runArgs, images)
+				if err != nil {
+					return err
+				}
+				return runner.Apply()
+			}
 
 			applier, err := apply.NewApplierFromArgs(cmd, runArgs, images)
 			if err != nil {

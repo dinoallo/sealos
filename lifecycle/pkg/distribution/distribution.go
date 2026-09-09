@@ -18,8 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-
-	"github.com/containers/image/v5/docker/reference"
 )
 
 var ErrNotFound = errors.New("distribution manifest not found")
@@ -28,8 +26,7 @@ type Manifest struct {
 	Name        string    `json:"name" yaml:"name"`
 	Version     string    `json:"version" yaml:"version"`
 	Description string    `json:"description,omitempty" yaml:"description,omitempty"`
-	Packages    []Package `json:"packages,omitempty" yaml:"packages,omitempty"`
-	Images      []string  `json:"images,omitempty" yaml:"images,omitempty"`
+	Packages    []Package `json:"packages" yaml:"packages"`
 }
 
 type Summary struct {
@@ -72,49 +69,21 @@ func (m Manifest) Validate() error {
 	if m.Version == "" {
 		return errors.New("distribution version is required")
 	}
-	if len(m.Packages) == 0 && len(m.Images) == 0 {
+	if len(m.Packages) == 0 {
 		return errors.New("distribution packages are required")
 	}
-	if len(m.Packages) > 0 && len(m.Images) > 0 {
-		return errors.New("distribution cannot define both packages and images")
+	seen := make(map[string]struct{}, len(m.Packages))
+	for i, pkg := range m.Packages {
+		if err := pkg.Validate(); err != nil {
+			return fmt.Errorf("distribution package %d: %w", i, err)
+		}
+		if _, ok := seen[pkg.Ref()]; ok {
+			return fmt.Errorf("duplicate distribution package %q", pkg.Ref())
+		}
+		seen[pkg.Ref()] = struct{}{}
 	}
-	if len(m.Packages) > 0 {
-		seen := make(map[string]struct{}, len(m.Packages))
-		for i, pkg := range m.Packages {
-			if err := pkg.Validate(); err != nil {
-				return fmt.Errorf("distribution package %d: %w", i, err)
-			}
-			if _, ok := seen[pkg.Ref()]; ok {
-				return fmt.Errorf("duplicate distribution package %q", pkg.Ref())
-			}
-			seen[pkg.Ref()] = struct{}{}
-		}
-		return nil
+	if _, err := orderPackages(m.Packages); err != nil {
+		return fmt.Errorf("invalid distribution package dependencies: %w", err)
 	}
-
-	seen := make(map[string]struct{}, len(m.Images))
-	for i, image := range m.Images {
-		image = strings.TrimSpace(image)
-		if image == "" {
-			return fmt.Errorf("distribution image %d is empty", i)
-		}
-		if _, ok := seen[image]; ok {
-			return fmt.Errorf("duplicate distribution image %q", image)
-		}
-		seen[image] = struct{}{}
-
-		named, err := reference.ParseNormalizedNamed(image)
-		if err != nil {
-			return fmt.Errorf("invalid distribution image %q: %w", image, err)
-		}
-		if _, ok := named.(reference.NamedTagged); ok {
-			continue
-		}
-		if _, ok := named.(reference.Digested); ok {
-			continue
-		}
-		return fmt.Errorf("distribution image %q must include a tag or digest", image)
-	}
-
 	return nil
 }

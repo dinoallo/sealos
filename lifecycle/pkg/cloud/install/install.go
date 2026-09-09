@@ -16,7 +16,9 @@ package install
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -550,9 +552,8 @@ func ResolveImages(manifest *distribution.Manifest) (Images, error) {
 	return images, err
 }
 
-// ValidateManifest checks whether the installer can consume a distribution.
-// The cloud distribution uses the fixed image mapping below; other
-// distributions use the bootstrap path and only need Kubernetes and Cilium.
+// ValidateManifest checks whether the installer can consume a package-based
+// distribution.
 func ValidateManifest(manifest *distribution.Manifest, options distribution.ResolveOptions) error {
 	if manifest == nil {
 		return errors.New("distribution manifest is nil")
@@ -561,10 +562,7 @@ func ValidateManifest(manifest *distribution.Manifest, options distribution.Reso
 		_, _, err := ResolveImagesWithOptions(manifest, options)
 		return err
 	}
-	if _, err := distribution.ResolvePackages(manifest, options); err != nil {
-		return err
-	}
-	_, err := bootstrapPackages(manifest)
+	_, err := distribution.ResolvePackages(manifest, options)
 	return err
 }
 
@@ -601,14 +599,8 @@ func ResolveImagesWithOptions(manifest *distribution.Manifest, options distribut
 		{"sealos-cloud-database-service", &images.CloudDatabaseService}, {"sealos-cloud-launchpad-service", &images.CloudLaunchpadService},
 	}
 	byName := make(map[string]distribution.ResolvedPackage, len(resolved))
-	for index, item := range resolved {
+	for _, item := range resolved {
 		name := item.Package.Name
-		if len(manifest.Packages) == 0 {
-			if index >= len(assign) {
-				return Images{}, nil, fmt.Errorf("distribution %s contains %d images; cloud installer requires %d ordered packages", manifest.Ref(), len(resolved), len(assign))
-			}
-			name = assign[index].name
-		}
 		if _, exists := byName[name]; exists {
 			return Images{}, nil, fmt.Errorf("distribution %s contains duplicate package name %q", manifest.Ref(), name)
 		}
@@ -637,34 +629,6 @@ func ResolveImagesWithOptions(manifest *distribution.Manifest, options distribut
 	return images, plans, nil
 }
 
-func bootstrapPackages(manifest *distribution.Manifest) ([]distribution.Package, error) {
-	if manifest == nil {
-		return nil, errors.New("distribution manifest is nil")
-	}
-	if len(manifest.Packages) == 0 {
-		if len(manifest.Images) < 2 {
-			return nil, fmt.Errorf("distribution %s requires Kubernetes and Cilium images", manifest.Ref())
-		}
-		return []distribution.Package{
-			{Name: "kubernetes", Version: "legacy", Remote: distribution.Remote{Image: manifest.Images[0]}},
-			{Name: "cilium", Version: "legacy", Remote: distribution.Remote{Image: manifest.Images[1]}},
-		}, nil
-	}
-
-	selected := make([]distribution.Package, 0, 2)
-	seen := map[string]bool{}
-	for _, pkg := range manifest.Packages {
-		if (pkg.Name == "kubernetes" || pkg.Name == "cilium") && !seen[pkg.Name] {
-			selected = append(selected, pkg)
-			seen[pkg.Name] = true
-		}
-	}
-	if !seen["kubernetes"] || !seen["cilium"] {
-		return nil, fmt.Errorf("distribution %s requires packages named kubernetes and cilium", manifest.Ref())
-	}
-	return selected, nil
-}
-
 func (i Images) RewriteProxy() Images {
 	rewrite := func(image string) string {
 		if strings.HasPrefix(image, "ghcr.io/") {
@@ -691,9 +655,10 @@ func (i Images) RewriteProxy() Images {
 }
 
 type Command struct {
-	Name string
-	Args []string
-	Dir  string
+	Name          string
+	Args          []string
+	Dir           string
+	SensitiveArgs bool
 }
 
 func (c Command) String() string {
@@ -707,6 +672,9 @@ func (c Command) String() string {
 
 func (c Command) RedactedString() string {
 	args := append([]string(nil), c.Args...)
+	if c.SensitiveArgs && len(args) > 0 {
+		args[len(args)-1] = "<redacted-package-cleanup-script>"
+	}
 	for index := range args {
 		if args[index] == "--passwd" || args[index] == "--pk-passwd" || args[index] == "-p" || args[index] == "--password" {
 			if index+1 < len(args) {
@@ -786,10 +754,140 @@ func (r *CommandRunner) Output(ctx context.Context, command Command) ([]byte, er
 }
 
 type Installer struct {
-	Config Config
-	Runner Runner
-	Stdout io.Writer
-	Log    io.Writer
+	Config       Config
+	Runner       Runner
+	Stdout       io.Writer
+	Log          io.Writer
+	cleanupHooks map[string]cleanupHookArtifact
+}
+
+type cleanupHookArtifact struct {
+	Path   string
+	Script []byte
+}
+
+func (i *Installer) capturePackageCleanupHook(ctx context.Context, image string) error {
+	if i.Config.DryRun || strings.TrimSpace(image) == "" {
+		return nil
+	}
+	output, err := i.Runner.Output(ctx, Command{Name: "sealos", Args: []string{"inspect", "--type", "image", image}})
+	if err != nil {
+		return fmt.Errorf("inspect package image %s: %w", image, err)
+	}
+	if len(strings.TrimSpace(string(output))) == 0 {
+		return nil
+	}
+	var inspected struct {
+		OCIv1 *struct {
+			Config struct {
+				Labels map[string]string `json:"Labels"`
+			} `json:"Config"`
+		} `json:"OCIv1"`
+	}
+	if err := json.Unmarshal(output, &inspected); err != nil {
+		return fmt.Errorf("decode package image %s metadata: %w", image, err)
+	}
+	if inspected.OCIv1 == nil {
+		return nil
+	}
+	hookPath := strings.TrimSpace(inspected.OCIv1.Config.Labels[distribution.PackageCleanupLabel])
+	if hookPath == "" {
+		return nil
+	}
+	if err := distribution.ValidateCleanupPath(hookPath); err != nil {
+		return fmt.Errorf("package image %s cleanup hook: %w", image, err)
+	}
+
+	digest := sha256.Sum256([]byte(image))
+	container := "sealos-package-clean-" + hex.EncodeToString(digest[:8])
+	if err := i.run(ctx, Command{Name: "sealos", Args: []string{"create", "--cluster", container, image}}); err != nil {
+		return fmt.Errorf("create package image %s for cleanup extraction: %w", image, err)
+	}
+	defer func() {
+		_ = i.run(ctx, Command{Name: "sealos", Args: []string{"umount", container}})
+		_ = i.run(ctx, Command{Name: "sealos", Args: []string{"rm", container}})
+	}()
+	mountOutput, err := i.Runner.Output(ctx, Command{Name: "sealos", Args: []string{"mount", "--json", container}})
+	if err != nil {
+		return fmt.Errorf("mount package image %s for cleanup extraction: %w", image, err)
+	}
+	var mounts []struct {
+		MountPoint string `json:"mountPoint"`
+	}
+	if err := json.Unmarshal(mountOutput, &mounts); err != nil {
+		return fmt.Errorf("decode package image %s mount point: %w", image, err)
+	}
+	if len(mounts) != 1 || strings.TrimSpace(mounts[0].MountPoint) == "" {
+		return fmt.Errorf("package image %s did not produce one mount point", image)
+	}
+	root := filepath.Clean(mounts[0].MountPoint)
+	scriptPath := filepath.Join(root, strings.TrimPrefix(hookPath, string(filepath.Separator)))
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return fmt.Errorf("resolve package image %s mount point: %w", image, err)
+	}
+	resolvedScript, err := filepath.EvalSymlinks(scriptPath)
+	if err != nil {
+		return fmt.Errorf("resolve package cleanup hook %s: %w", hookPath, err)
+	}
+	relative, err := filepath.Rel(resolvedRoot, resolvedScript)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return fmt.Errorf("package cleanup hook %s escapes the image rootfs", hookPath)
+	}
+	info, err := os.Stat(scriptPath)
+	if err != nil {
+		return fmt.Errorf("stat package cleanup hook %s: %w", hookPath, err)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("package cleanup hook %s is not a regular file", hookPath)
+	}
+	if info.Mode().Perm()&0o111 == 0 {
+		return fmt.Errorf("package cleanup hook %s is not executable", hookPath)
+	}
+	script, err := os.ReadFile(scriptPath)
+	if err != nil {
+		return fmt.Errorf("read package cleanup hook %s: %w", hookPath, err)
+	}
+	if i.cleanupHooks == nil {
+		i.cleanupHooks = make(map[string]cleanupHookArtifact)
+	}
+	i.cleanupHooks[image] = cleanupHookArtifact{Path: hookPath, Script: append([]byte(nil), script...)}
+	return nil
+}
+
+func (i *Installer) imageHasPackageInit(ctx context.Context, image string) (bool, error) {
+	if i.Config.DryRun {
+		return false, nil
+	}
+	output, err := i.Runner.Output(ctx, Command{Name: "sealos", Args: []string{"inspect", "--type", "image", image}})
+	if err != nil {
+		return false, fmt.Errorf("inspect package image %s: %w", image, err)
+	}
+	var inspected struct {
+		OCIv1 *struct {
+			Config struct {
+				Labels map[string]string `json:"Labels"`
+			} `json:"Config"`
+		} `json:"OCIv1"`
+	}
+	if err := json.Unmarshal(output, &inspected); err != nil {
+		return false, fmt.Errorf("decode package image %s metadata: %w", image, err)
+	}
+	return inspected.OCIv1 != nil && strings.TrimSpace(inspected.OCIv1.Config.Labels[distribution.PackageInitLabel]) != "", nil
+}
+
+func (i *Installer) cleanupArtifactForImage(image string) (cleanupHookArtifact, bool) {
+	if i == nil || len(i.cleanupHooks) == 0 {
+		return cleanupHookArtifact{}, false
+	}
+	if artifact, ok := i.cleanupHooks[image]; ok {
+		return artifact, true
+	}
+	if strings.HasPrefix(image, "ghcr.io/") {
+		artifact, ok := i.cleanupHooks["ghcr.dockerproxy.net/"+strings.TrimPrefix(image, "ghcr.io/")]
+		return artifact, ok
+	}
+	return cleanupHookArtifact{}, false
 }
 
 func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest) error {
@@ -841,11 +939,15 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 		images = images.RewriteProxy()
 	}
 	installed, ready := i.clusterStatus(ctx)
+	ciliumReady := installed && i.ciliumStatus(ctx)
 	i.info("Starting Sealos Cloud installation for %s", manifest.Ref())
-	i.info("Kubernetes installed=%t ready=%t", installed, ready)
+	i.info("Kubernetes installed=%t ready=%t Cilium ready=%t", installed, ready, ciliumReady)
 
 	for _, image := range []string{images.Kubernetes, images.Cilium, images.CertManager, images.Helm, images.OpenEBS, images.Higress, images.KubeBlocks, images.Cockroach, images.MetricsServer, images.VictoriaMetricsKubernetesStack, images.Cloud, images.Finish, images.Certs} {
 		if err := i.run(ctx, Command{Name: "sealos", Args: []string{"pull", "-q", image}}); err != nil {
+			return err
+		}
+		if err := i.capturePackageCleanupHook(ctx, image); err != nil {
 			return err
 		}
 	}
@@ -864,14 +966,19 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	if err := i.prepareCloudRuntimeConfig(ctx); err != nil {
 		return err
 	}
-	if !ready {
+	if !ciliumReady {
 		if err := i.run(ctx, i.ciliumCommand(images.Cilium)); err != nil {
 			return err
 		}
 		if !i.Config.DryRun {
-			if err := i.waitClusterReady(ctx); err != nil {
+			if err := i.waitCiliumReady(ctx); err != nil {
 				return err
 			}
+		}
+	}
+	if !ready && !i.Config.DryRun {
+		if err := i.waitClusterReady(ctx); err != nil {
+			return err
 		}
 	}
 	for _, command := range []Command{
@@ -922,9 +1029,10 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	return i.recordInstalledState(ctx, manifest)
 }
 
-// Reset reuses the legacy cluster reset implementation after removing the
-// distribution-specific runtime files that are outside the legacy Clusterfile
-// cleanup path.
+// Reset executes package-owned cleanup hooks in reverse dependency order. A
+// distribution reset deliberately does not delegate to the legacy reset
+// command: containerd, registry, Kubernetes, and application packages own
+// their cleanup behavior through their package images.
 func (i *Installer) Reset(ctx context.Context, clusterName string) error {
 	if err := i.Config.ValidateReset(); err != nil {
 		return err
@@ -935,16 +1043,67 @@ func (i *Installer) Reset(ctx context.Context, clusterName string) error {
 	if i.Stdout == nil {
 		i.Stdout = io.Discard
 	}
-	if err := i.run(ctx, i.distributionRuntimeCleanupCommand(clusterName)); err != nil {
-		return fmt.Errorf("clean distribution runtime: %w", err)
+	store, err := i.stateStore()
+	if err != nil {
+		return err
 	}
-	if err := i.run(ctx, i.legacyResetCommand(clusterName)); err != nil {
-		return fmt.Errorf("reset cluster: %w", err)
+	state, err := store.Load()
+	if err != nil {
+		return fmt.Errorf("load package state for reset: %w", err)
+	}
+	ordered, err := distribution.OrderInstalledPackages(state.Packages)
+	if err != nil {
+		return err
+	}
+	if i.Config.DryRun {
+		for index := len(ordered) - 1; index >= 0; index-- {
+			pkg := ordered[index]
+			if pkg.Cleanup != nil && !pkg.CleanupDone {
+				i.info("Would clean package %s on masters and workers", pkg.Ref())
+			}
+		}
+		return nil
+	}
+	unlock, err := store.Lock(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	var cleanupErrors []error
+	for index := len(ordered) - 1; index >= 0; index-- {
+		pkg := ordered[index]
+		if pkg.Cleanup == nil || pkg.CleanupDone {
+			continue
+		}
+		script, readErr := store.ReadCleanupArtifact(*pkg.Cleanup)
+		if readErr != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup package %s: %w", pkg.Ref(), readErr))
+			continue
+		}
+		if err := i.run(ctx, i.packageCleanupCommand(clusterName, pkg, script)); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("cleanup package %s: %w", pkg.Ref(), err))
+			continue
+		}
+		for stateIndex := range state.Packages {
+			if state.Packages[stateIndex].Ref() == pkg.Ref() {
+				state.Packages[stateIndex].CleanupDone = true
+				break
+			}
+		}
+		if err := store.Save(state); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("save package cleanup state after %s: %w", pkg.Ref(), err))
+		}
+	}
+	if len(cleanupErrors) > 0 {
+		return errors.Join(cleanupErrors...)
 	}
 	return nil
 }
 
-func (i *Installer) distributionRuntimeCleanupCommand(clusterName string) Command {
+func (i *Installer) packageCleanupCommand(clusterName string, pkg distribution.InstalledPackage, script []byte) Command {
+	encoded := base64.StdEncoding.EncodeToString(script)
+	temporary := "$(mktemp -d /tmp/sealos-package-clean.XXXXXX)"
+	remoteScript := fmt.Sprintf("set -eu; tmpdir=%s; tmp=\"$tmpdir/hook.sh\"; trap 'rm -rf -- \"$tmpdir\"' EXIT; printf '%%s' '%s' | base64 -d > \"$tmp\"; chmod 700 \"$tmp\"; (cd \"$tmpdir\" && env SEALOS_PACKAGE_NAME=%s SEALOS_PACKAGE_VERSION=%s SEALOS_CLUSTER_NAME=%s \"$tmp\")", temporary, encoded, shellQuote(pkg.Name), shellQuote(pkg.Version), shellQuote(clusterName))
 	args := []string{"exec", "--cluster", clusterName}
 	appendArg := func(name, value string) {
 		if strings.TrimSpace(value) != "" {
@@ -958,28 +1117,28 @@ func (i *Installer) distributionRuntimeCleanupCommand(clusterName string) Comman
 	if i.Config.SSHPort != 0 {
 		args = append(args, "--port", strconv.Itoa(int(i.Config.SSHPort)))
 	}
-	args = append(args, "--roles", "master", "--capture-output", "rm -rf -- /root/.sealos/cloud")
-	return Command{
-		Name: "sealos",
-		Args: args,
-	}
-}
-
-func (i *Installer) legacyResetCommand(clusterName string) Command {
-	args := []string{"reset", "--cluster", clusterName, "--force"}
-	appendArg := func(name, value string) {
-		if strings.TrimSpace(value) != "" {
-			args = append(args, name, value)
+	targets := make([]string, 0, 2)
+	for _, value := range []string{i.Config.Masters, i.Config.Nodes} {
+		for _, target := range strings.FieldsFunc(value, func(r rune) bool {
+			return r == ',' || r == ' ' || r == '\t' || r == '\n'
+		}) {
+			target = strings.TrimSpace(target)
+			if target != "" && !containsString(targets, target) {
+				targets = append(targets, target)
+			}
 		}
 	}
-	appendArg("--user", i.Config.User)
-	appendArg("--passwd", i.Config.SSHPassword)
-	appendArg("--pk", i.Config.SSHKey)
-	appendArg("--pk-passwd", i.Config.SSHKeyPasswd)
-	if i.Config.SSHPort != 0 {
-		args = append(args, "--port", strconv.Itoa(int(i.Config.SSHPort)))
+	args = append(args, "--ips", strings.Join(targets, ","), "--capture-output", remoteScript)
+	return Command{Name: "sealos", Args: args, SensitiveArgs: true}
+}
+
+func containsString(values []string, value string) bool {
+	for _, item := range values {
+		if item == value {
+			return true
+		}
 	}
-	return Command{Name: "sealos", Args: args}
+	return false
 }
 
 func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution.Manifest, workDir string) error {
@@ -1028,13 +1187,30 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 			}
 		}
 	}
+	preinstalled, err := i.installPackageDependencies(ctx, resolved, "kubernetes")
+	if err != nil {
+		return err
+	}
 
 	installed, ready := i.clusterStatus(ctx)
+	ciliumReady := installed && i.ciliumStatus(ctx)
 	i.info("Starting distribution bootstrap for %s", manifest.Ref())
-	i.info("Kubernetes installed=%t ready=%t", installed, ready)
+	i.info("Kubernetes installed=%t ready=%t Cilium ready=%t", installed, ready, ciliumReady)
 	if !installed {
 		if err := i.pullImage(ctx, kubernetesImage, ""); err != nil {
 			return err
+		}
+		if err := i.capturePackageCleanupHook(ctx, kubernetesImage); err != nil {
+			return err
+		}
+		packageImage, err := i.imageHasPackageInit(ctx, kubernetesImage)
+		if err != nil {
+			return err
+		}
+		if packageImage {
+			if err := i.run(ctx, i.kubernetesPackageCommand(kubernetesImage)); err != nil {
+				return fmt.Errorf("initialize Kubernetes package %s: %w", kubernetesImage, err)
+			}
 		}
 		if err := i.run(ctx, i.kubernetesCommand(kubernetesImage)); err != nil {
 			return err
@@ -1047,18 +1223,34 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 	if err := i.prepareCloudRuntimeConfig(ctx); err != nil {
 		return err
 	}
-	if !ready {
+	if !ciliumReady {
 		if err := i.pullImage(ctx, ciliumImage, ""); err != nil {
 			return err
 		}
-		if err := i.run(ctx, i.ciliumCommand(ciliumImage)); err != nil {
+		if err := i.capturePackageCleanupHook(ctx, ciliumImage); err != nil {
+			return err
+		}
+		packageImage, err := i.imageHasPackageInit(ctx, ciliumImage)
+		if err != nil {
+			return err
+		}
+		command := i.ciliumCommand(ciliumImage)
+		if packageImage {
+			command = i.ciliumPackageCommand(ciliumImage)
+		}
+		if err := i.run(ctx, command); err != nil {
 			return err
 		}
 		i.cleanupImage(ctx, ciliumImage)
 		if !i.Config.DryRun {
-			if err := i.waitClusterReady(ctx); err != nil {
-				return err
+			if err := i.waitCiliumReady(ctx); err != nil {
+				return fmt.Errorf("wait for Cilium package readiness: %w", err)
 			}
+		}
+	}
+	if !ready && !i.Config.DryRun {
+		if err := i.waitClusterReady(ctx); err != nil {
+			return err
 		}
 	}
 	for _, item := range resolved {
@@ -1068,16 +1260,80 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 		if err := i.pullImage(ctx, item.Image, ""); err != nil {
 			return err
 		}
+		if err := i.capturePackageCleanupHook(ctx, item.Image); err != nil {
+			return err
+		}
 		i.cleanupImage(ctx, item.Image)
 	}
 	if err := i.ensurePlatformNamespaces(ctx); err != nil {
 		return err
 	}
-	if err := i.installDistributionPackages(ctx, images); err != nil {
+	if err := i.installDistributionPackages(ctx, resolved, preinstalled); err != nil {
 		return err
 	}
 	i.info("Distribution installation completed with all packages processed")
 	return nil
+}
+
+func (i *Installer) installPackageDependencies(ctx context.Context, resolved []distribution.ResolvedPackage, targetName string) (map[string]bool, error) {
+	byRef := make(map[string]distribution.ResolvedPackage, len(resolved))
+	target := ""
+	for _, item := range resolved {
+		byRef[item.Package.Ref()] = item
+		if item.Package.Name == targetName {
+			if target != "" {
+				return nil, fmt.Errorf("distribution contains multiple %s packages", targetName)
+			}
+			target = item.Package.Ref()
+		}
+	}
+	if target == "" {
+		return nil, fmt.Errorf("distribution is missing package %q", targetName)
+	}
+
+	needed := make(map[string]bool)
+	visiting := make(map[string]bool)
+	var visit func(string) error
+	visit = func(ref string) error {
+		if visiting[ref] {
+			return fmt.Errorf("package dependency cycle detected while installing %s", ref)
+		}
+		item, ok := byRef[ref]
+		if !ok {
+			return fmt.Errorf("package %s depends on missing package %q", target, ref)
+		}
+		if needed[ref] {
+			return nil
+		}
+		visiting[ref] = true
+		if len(item.Dependencies) == 0 && len(item.Package.DependsOn) > 0 {
+			return fmt.Errorf("package %s has unresolved dependencies", item.Package.Ref())
+		}
+		for _, dependency := range item.Dependencies {
+			if err := visit(dependency); err != nil {
+				return err
+			}
+			needed[dependency] = true
+		}
+		delete(visiting, ref)
+		return nil
+	}
+	if err := visit(target); err != nil {
+		return nil, err
+	}
+	delete(needed, target)
+	for _, item := range resolved {
+		if !needed[item.Package.Ref()] {
+			continue
+		}
+		if item.Package.Name == "cilium" {
+			return nil, fmt.Errorf("package %s cannot be a Kubernetes prerequisite", item.Package.Ref())
+		}
+		if err := i.runPackage(ctx, i.systemPackageCommand(item.Image)); err != nil {
+			return nil, fmt.Errorf("install package dependency %s: %w", item.Package.Ref(), err)
+		}
+	}
+	return needed, nil
 }
 
 func (i *Installer) prepareCloudRuntimeConfig(ctx context.Context) error {
@@ -1183,7 +1439,17 @@ func selectCiliumPackage(resolved []distribution.ResolvedPackage, version string
 	return distribution.ResolvedPackage{}, fmt.Errorf("version %q is unavailable (available: %s)", version, strings.Join(available, ", "))
 }
 
-func (i *Installer) installDistributionPackages(ctx context.Context, images map[string]string) error {
+func (i *Installer) installDistributionPackages(ctx context.Context, resolved []distribution.ResolvedPackage, preinstalled map[string]bool) error {
+	images := make(map[string]string, len(resolved))
+	for _, item := range resolved {
+		if item.Package.Name == "kubernetes" || item.Package.Name == "cilium" {
+			continue
+		}
+		if _, exists := images[item.Package.Name]; exists {
+			return fmt.Errorf("distribution contains duplicate package name %q", item.Package.Name)
+		}
+		images[item.Package.Name] = item.Image
+	}
 	if images["sealos-cloud-desktop-frontend"] != "" {
 		for _, name := range []string{
 			"sealos-cloud-desktop-frontend",
@@ -1214,19 +1480,24 @@ func (i *Installer) installDistributionPackages(ctx context.Context, images map[
 		}
 	}
 
-	for _, name := range []string{"cert-manager", "openebs", "higress", "victoria-metrics-k8s-stack", "kubeblocks", "sealos-oss", "sealos-minio", "vlogs", "sealos-offline", "dnsmasq", "devbox"} {
-		if image := images[name]; image != "" {
-			command := i.runImage(image)
-			if name == "sealos-oss" {
-				command = i.imageWithEnv(image, "SEALOS_V2_SERVICE_NODEPORT_RANGE", i.Config.ServiceNodePortRange)
-			}
-			if err := i.runPackage(ctx, command); err != nil {
+	for _, item := range resolved {
+		name := item.Package.Name
+		if name == "kubernetes" || name == "cilium" || isCloudPackage(name) {
+			continue
+		}
+		if preinstalled[item.Package.Ref()] {
+			continue
+		}
+		command := i.runImage(item.Image)
+		if name == "sealos-oss" {
+			command = i.imageWithEnv(item.Image, "SEALOS_V2_SERVICE_NODEPORT_RANGE", i.Config.ServiceNodePortRange)
+		}
+		if err := i.runPackage(ctx, command); err != nil {
+			return fmt.Errorf("install package %s: %w", item.Package.Ref(), err)
+		}
+		if name == "sealos-oss" {
+			if err := i.waitForConfigMap(ctx, "sealos-config", "sealos-system"); err != nil {
 				return err
-			}
-			if name == "sealos-oss" {
-				if err := i.waitForConfigMap(ctx, "sealos-config", "sealos-system"); err != nil {
-					return err
-				}
 			}
 		}
 	}
@@ -1308,6 +1579,10 @@ func (i *Installer) installDistributionPackages(ctx context.Context, images map[
 	return nil
 }
 
+func isCloudPackage(name string) bool {
+	return strings.HasPrefix(name, "sealos-cloud-")
+}
+
 func (i *Installer) run(ctx context.Context, command Command) error {
 	line := command.RedactedString()
 	i.info("Running: %s", line)
@@ -1335,10 +1610,23 @@ func (i *Installer) pullImage(ctx context.Context, image, policy string) error {
 }
 
 func commandImage(command Command) string {
-	if command.Name != "sealos" || len(command.Args) < 3 || command.Args[0] != "run" {
+	if command.Name != "sealos" || len(command.Args) < 2 || command.Args[0] != "run" {
 		return ""
 	}
-	return strings.TrimSpace(command.Args[2])
+	for index := 1; index < len(command.Args); index++ {
+		arg := strings.TrimSpace(command.Args[index])
+		if arg == "" || arg == "--force" || arg == "--package" {
+			continue
+		}
+		if strings.HasPrefix(arg, "-") {
+			if !strings.Contains(arg, "=") && index+1 < len(command.Args) {
+				index++
+			}
+			continue
+		}
+		return arg
+	}
+	return ""
 }
 
 func (i *Installer) runPackage(ctx context.Context, command Command) error {
@@ -1347,6 +1635,9 @@ func (i *Installer) runPackage(ctx context.Context, command Command) error {
 		return nil
 	}
 	if err := i.pullImage(ctx, image, ""); err != nil {
+		return err
+	}
+	if err := i.capturePackageCleanupHook(ctx, image); err != nil {
 		return err
 	}
 	if err := i.run(ctx, command); err != nil {
@@ -1378,6 +1669,42 @@ func (i *Installer) clusterStatus(ctx context.Context) (bool, bool) {
 		return false, false
 	}
 	return true, nodesReady(output)
+}
+
+func (i *Installer) ciliumStatus(ctx context.Context) bool {
+	if i.Config.DryRun {
+		return false
+	}
+	output, err := i.Runner.Output(ctx, i.kubectlCommand(
+		"get", "daemonset", "cilium", "--namespace", "kube-system", "--output", "json",
+	))
+	return err == nil && daemonSetReady(output)
+}
+
+func (i *Installer) waitCiliumReady(ctx context.Context) error {
+	return i.waitUntil(ctx, func() (bool, error) {
+		output, err := i.Runner.Output(ctx, i.kubectlCommand(
+			"get", "daemonset", "cilium", "--namespace", "kube-system", "--output", "json",
+		))
+		if err != nil {
+			return false, nil
+		}
+		return daemonSetReady(output), nil
+	})
+}
+
+func daemonSetReady(output []byte) bool {
+	var status struct {
+		Status struct {
+			DesiredNumberScheduled int `json:"desiredNumberScheduled"`
+			NumberReady            int `json:"numberReady"`
+		} `json:"status"`
+	}
+	if err := json.Unmarshal(output, &status); err != nil {
+		return false
+	}
+	return status.Status.DesiredNumberScheduled > 0 &&
+		status.Status.NumberReady >= status.Status.DesiredNumberScheduled
 }
 
 func (i *Installer) waitClusterReady(ctx context.Context) error {
@@ -1438,7 +1765,7 @@ func nodesReady(output []byte) bool {
 }
 
 func (i *Installer) kubernetesCommand(image string) Command {
-	args := []string{"run", "--force", image}
+	args := []string{"run", "--force", "--allow-existing-runtime", image}
 	args = i.withCluster(args)
 	appendArg := func(name, value string) {
 		if value != "" {
@@ -1458,6 +1785,43 @@ func (i *Installer) kubernetesCommand(image string) Command {
 	appendArg("--passwd", i.Config.SSHPassword)
 	appendArg("--user", i.Config.User)
 	appendArg("--port", strconv.Itoa(int(i.Config.SSHPort)))
+	return Command{Name: "sealos", Args: args}
+}
+
+func (i *Installer) systemPackageCommand(image string) Command {
+	return i.packageImageWithEnvs(image, map[string]string{
+		"registryDomain":   "sealos.hub",
+		"registryPort":     "5000",
+		"registryUsername": "admin",
+		"registryPassword": i.Config.RegistryPass,
+	})
+}
+
+func (i *Installer) packageImageWithEnvs(image string, env map[string]string) Command {
+	args := []string{"run", "--package", "--force", image}
+	args = i.withCluster(args)
+	appendArg := func(name, value string) {
+		if strings.TrimSpace(value) != "" {
+			args = append(args, name, value)
+		}
+	}
+	appendArg("--masters", i.Config.Masters)
+	appendArg("--nodes", i.Config.Nodes)
+	appendArg("--pk", i.Config.SSHKey)
+	appendArg("--pk-passwd", i.Config.SSHKeyPasswd)
+	appendArg("--passwd", i.Config.SSHPassword)
+	appendArg("--user", i.Config.User)
+	if i.Config.SSHPort != 0 {
+		appendArg("--port", strconv.Itoa(int(i.Config.SSHPort)))
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		appendArg("--env", key+"="+env[key])
+	}
 	return Command{Name: "sealos", Args: args}
 }
 
@@ -1565,6 +1929,28 @@ func (i *Installer) waitForAPIServer(ctx context.Context) error {
 
 func (i *Installer) ciliumCommand(image string) Command {
 	return i.imageWithEnvs(image, map[string]string{
+		"KUBEADM_POD_SUBNET":    i.Config.PodCIDR,
+		"KUBEADM_SERVICE_RANGE": i.Config.ServiceNodePortRange,
+		"CILIUM_MASKSIZE":       i.Config.CiliumMaskSize,
+	})
+}
+
+func (i *Installer) kubernetesPackageCommand(image string) Command {
+	return i.packageImageWithEnvs(image, map[string]string{
+		"KUBEADM_POD_SUBNET":     i.Config.PodCIDR,
+		"KUBEADM_SERVICE_SUBNET": i.Config.ServiceCIDR,
+		"KUBEADM_SERVICE_RANGE":  i.Config.ServiceNodePortRange,
+		"KUBEADM_MAX_PODS":       strconv.Itoa(i.Config.MaxPods),
+		"KUBEADM_CONTAINERD_DIR": i.Config.ContainerdStorage,
+		"registryDomain":         "sealos.hub",
+		"registryPort":           "5000",
+		"registryUsername":       "admin",
+		"registryPassword":       i.Config.RegistryPass,
+	})
+}
+
+func (i *Installer) ciliumPackageCommand(image string) Command {
+	return i.packageImageWithEnvs(image, map[string]string{
 		"KUBEADM_POD_SUBNET":    i.Config.PodCIDR,
 		"KUBEADM_SERVICE_RANGE": i.Config.ServiceNodePortRange,
 		"CILIUM_MASKSIZE":       i.Config.CiliumMaskSize,

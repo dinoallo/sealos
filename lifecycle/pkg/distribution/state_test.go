@@ -37,7 +37,7 @@ func TestStateStoreRoundTripAndTransaction(t *testing.T) {
 		Distribution:        "cloud@v1.0.0",
 		ManifestFingerprint: "sha256:manifest",
 		Packages: []InstalledPackage{{
-			Name: "demo", Version: "v1.0.0", Fingerprint: "sha256:package", Status: PackageStatusInstalled,
+			Name: "demo", Version: "v1.0.0", Fingerprint: "sha256:package", DependsOn: []string{"containerd@v1"}, Status: PackageStatusInstalled,
 		}},
 	}
 	require.NoError(t, store.Save(state))
@@ -109,6 +109,15 @@ func TestStateStoreRejectsDuplicatePackages(t *testing.T) {
 		{Name: "demo", Version: "v2", Fingerprint: "sha256:b"},
 	}})
 	require.ErrorContains(t, err, `duplicate package "demo"`)
+}
+
+func TestOrderInstalledPackagesTreatsMissingDependsOnAsIndependent(t *testing.T) {
+	ordered, err := OrderInstalledPackages([]InstalledPackage{
+		{Name: "first", Version: "v1"},
+		{Name: "second", Version: "v1"},
+	})
+	require.NoError(t, err)
+	require.Equal(t, []string{"first@v1", "second@v1"}, []string{ordered[0].Ref(), ordered[1].Ref()})
 }
 
 func TestTargetIDIsStableForMasterOrder(t *testing.T) {

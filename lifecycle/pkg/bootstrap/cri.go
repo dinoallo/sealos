@@ -22,6 +22,10 @@ type defaultCRIInitializer struct{ common }
 
 func (*defaultCRIInitializer) String() string { return "cri_initializer" }
 
+func (*defaultCRIInitializer) Filter(ctx Context, _ string) bool {
+	return !packageManagedRootfs(ctx.GetCluster())
+}
+
 func (initializer *defaultCRIInitializer) Apply(ctx Context, host string) error {
 	initCRI := ctx.GetBash().InitCRIBash(host)
 	if initCRI == "" {

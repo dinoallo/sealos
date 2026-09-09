@@ -1,0 +1,4 @@
+FROM 192.168.128.126:5000/dinoallo/sealos-platform/registry:v1
+
+COPY bcryptgen/sealos-package-bcrypt /usr/bin/sealos-package-bcrypt
+COPY package-init.sh /opt/sealos/package-init.sh

@@ -38,9 +38,10 @@ func TestDistributionInstallDryRun(t *testing.T) {
 	manifestDir := filepath.Join(repository, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
 	var manifest strings.Builder
-	manifest.WriteString("name: cloud\nversion: v5.1.0\nimages:\n")
+	manifest.WriteString("name: cloud\nversion: v5.1.0\npackages:\n")
 	for _, image := range testDistributionImages {
-		fmt.Fprintf(&manifest, "  - %s\n", image)
+		name, version := packageNameAndVersion(image)
+		fmt.Fprintf(&manifest, "  - name: %s\n    version: %s\n    remote:\n      image: %s\n", name, version, image)
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v5.1.0.yaml"), []byte(manifest.String()), 0o644))
 
@@ -71,9 +72,10 @@ func TestDistributionInstallConfigFile(t *testing.T) {
 	manifestDir := filepath.Join(repository, "distributions", "cloud")
 	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
 	var manifest strings.Builder
-	manifest.WriteString("name: cloud\nversion: v1.0.0\nimages:\n")
+	manifest.WriteString("name: cloud\nversion: v1.0.0\npackages:\n")
 	for _, image := range testDistributionImages {
-		fmt.Fprintf(&manifest, "  - %s\n", image)
+		name, version := packageNameAndVersion(image)
+		fmt.Fprintf(&manifest, "  - name: %s\n    version: %s\n    remote:\n      image: %s\n", name, version, image)
 	}
 	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte(manifest.String()), 0o644))
 
@@ -136,4 +138,10 @@ var testDistributionImages = []string{
 	"ghcr.io/labring/sealos-cloud-license-frontend:v5.1.0",
 	"ghcr.io/labring/sealos-cloud-database-service:v5.1.0",
 	"ghcr.io/labring/sealos-cloud-launchpad-service:v5.1.0",
+}
+
+func packageNameAndVersion(image string) (string, string) {
+	colon := strings.LastIndex(image, ":")
+	slash := strings.LastIndex(image[:colon], "/")
+	return image[slash+1 : colon], image[colon+1:]
 }

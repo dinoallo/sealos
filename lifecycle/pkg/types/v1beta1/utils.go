@@ -201,7 +201,9 @@ func (c *Cluster) GetVIP() string {
 	root := c.GetRootfsImage()
 	if root != nil {
 		vip := maps.GetFromKeys(root.Labels, ImageVIPKey)
-		return stringsutil.RenderTextWithEnv(vip, root.Env)
+		if vip = stringsutil.RenderTextWithEnv(vip, root.Env); vip != "" {
+			return vip
+		}
 	}
 	return defaultVIP
 }

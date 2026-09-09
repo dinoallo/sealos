@@ -37,11 +37,12 @@ import (
 )
 
 type CreateProcessor struct {
-	ClusterFile clusterfile.Interface
-	Buildah     buildah.Interface
-	Runtime     runtime.Interface
-	Guest       guest.Interface
-	ExtraEnvs   map[string]string // parsing from CLI arguments
+	ClusterFile          clusterfile.Interface
+	Buildah              buildah.Interface
+	Runtime              runtime.Interface
+	Guest                guest.Interface
+	ExtraEnvs            map[string]string // parsing from CLI arguments
+	AllowExistingRuntime bool
 }
 
 func (c *CreateProcessor) Execute(cluster *v2.Cluster) error {
@@ -85,7 +86,11 @@ func (c *CreateProcessor) Check(cluster *v2.Cluster) error {
 	// the order doesn't matter
 	ips = append(ips, cluster.GetMasterIPAndPortList()...)
 	ips = append(ips, cluster.GetNodeIPAndPortList()...)
-	return NewCheckError(checker.RunCheckList([]checker.Interface{checker.NewIPsHostChecker(ips), checker.NewContainerdChecker(ips)}, cluster, checker.PhasePre))
+	checks := []checker.Interface{checker.NewIPsHostChecker(ips)}
+	if !c.AllowExistingRuntime {
+		checks = append(checks, checker.NewContainerdChecker(ips))
+	}
+	return NewCheckError(checker.RunCheckList(checks, cluster, checker.PhasePre))
 }
 
 func (c *CreateProcessor) PreProcess(cluster *v2.Cluster) error {
@@ -186,9 +191,10 @@ func NewCreateProcessor(ctx context.Context, name string, clusterFile clusterfil
 	}
 
 	return &CreateProcessor{
-		ClusterFile: clusterFile,
-		Buildah:     bder,
-		Guest:       gs,
-		ExtraEnvs:   GetEnvs(ctx),
+		ClusterFile:          clusterFile,
+		Buildah:              bder,
+		Guest:                gs,
+		ExtraEnvs:            GetEnvs(ctx),
+		AllowExistingRuntime: AllowExistingRuntime(ctx),
 	}, nil
 }

@@ -44,17 +44,45 @@ type ClusterArgs struct {
 }
 
 func NewApplierFromArgs(cmd *cobra.Command, args *RunArgs, imageName []string) (applydrivers.Interface, error) {
+	cluster, cf, err := newClusterFromArgs(cmd, args, imageName)
+	if err != nil {
+		return nil, err
+	}
+
+	ctx := withCommonContext(cmd.Context(), cmd)
+	return applydrivers.NewDefaultApplier(ctx, cluster, cf, imageName)
+}
+
+func NewPackageRunnerFromArgs(cmd *cobra.Command, args *RunArgs, imageName []string) (*PackageRunner, error) {
+	if len(imageName) != 1 {
+		return nil, errors.New("standalone package mode requires exactly one image")
+	}
+	cluster, _, err := newClusterFromArgs(cmd, args, imageName)
+	if err != nil {
+		return nil, err
+	}
+	return &PackageRunner{
+		Context: withCommonContext(cmd.Context(), cmd),
+		Cluster: cluster,
+		Image:   imageName[0],
+	}, nil
+}
+
+func newClusterFromArgs(cmd *cobra.Command, args *RunArgs, imageName []string) (*v2.Cluster, clusterfile.Interface, error) {
 	clusterPath := constants.Clusterfile(args.ClusterName)
 	cf := clusterfile.NewClusterFile(clusterPath,
 		clusterfile.WithCustomConfigFiles(args.CustomConfigFiles),
 		clusterfile.WithCustomEnvs(args.CustomEnv),
 	)
-	err := cf.Process()
-	if err != nil && err != clusterfile.ErrClusterFileNotExists {
-		return nil, err
+	var err error
+	var cluster *v2.Cluster
+	if !args.Package {
+		err = cf.Process()
+		if err != nil && err != clusterfile.ErrClusterFileNotExists {
+			return nil, nil, err
+		}
+		cluster = cf.GetCluster()
 	}
-
-	cluster := cf.GetCluster()
 	if cluster == nil {
 		logger.Debug("creating new cluster")
 		if args.Masters == "" && args.Nodes == "" {
@@ -70,12 +98,9 @@ func NewApplierFromArgs(cmd *cobra.Command, args *RunArgs, imageName []string) (
 		cluster:     cluster,
 	}
 	if err = c.runArgs(cmd, args, imageName); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-
-	ctx := withCommonContext(cmd.Context(), cmd)
-
-	return applydrivers.NewDefaultApplier(ctx, c.cluster, cf, imageName)
+	return c.cluster, cf, nil
 }
 
 func withCommonContext(ctx context.Context, cmd *cobra.Command) context.Context {
@@ -86,6 +111,10 @@ func withCommonContext(ctx context.Context, cmd *cobra.Command) context.Context 
 	if flagChanged(cmd, "env") {
 		v, _ := cmd.Flags().GetStringSlice("env")
 		ctx = processor.WithEnvs(ctx, maps.FromSlice(v))
+	}
+	if flagChanged(cmd, "allow-existing-runtime") {
+		v, _ := cmd.Flags().GetBool("allow-existing-runtime")
+		ctx = processor.WithAllowExistingRuntime(ctx, v)
 	}
 	return ctx
 }
