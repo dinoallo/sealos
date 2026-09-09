@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -141,6 +142,48 @@ func TestServiceNodePortRangeCommand(t *testing.T) {
 	require.Contains(t, command.Args[3], `cp "$tmp" "$manifest"`)
 	require.Contains(t, command.Args[3], `awk -v node_port_range="$node_port_range"`)
 	require.NotContains(t, command.Args[3], "sed -i")
+}
+
+func TestPrepareClusterBootstrapArchivesStaleLocalState(t *testing.T) {
+	previousRoot := constants.DefaultRuntimeRootDir
+	constants.DefaultRuntimeRootDir = t.TempDir()
+	t.Cleanup(func() { constants.DefaultRuntimeRootDir = previousRoot })
+
+	cfg := DefaultConfig()
+	cfg.ClusterName = "platform-test"
+	cfg.Masters = "192.0.2.10"
+	clusterDir := constants.ClusterDir(cfg.ClusterName)
+	require.NoError(t, os.MkdirAll(clusterDir, 0o700))
+	require.NoError(t, os.WriteFile(constants.Clusterfile(cfg.ClusterName), []byte("stale"), 0o600))
+
+	runner := &remoteStateRunner{output: []byte("absent\n")}
+	installer := Installer{Config: cfg, Runner: runner, Stdout: io.Discard}
+	require.NoError(t, installer.prepareClusterBootstrap(context.Background()))
+	_, err := os.Stat(constants.Clusterfile(cfg.ClusterName))
+	require.ErrorIs(t, err, os.ErrNotExist)
+	entries, err := os.ReadDir(filepath.Dir(clusterDir))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	require.Contains(t, entries[0].Name(), "platform-test.stale-")
+	require.Contains(t, runner.commands[0].String(), "/etc/kubernetes/manifests/kube-apiserver.yaml")
+}
+
+func TestPrepareClusterBootstrapRejectsPartialRemoteState(t *testing.T) {
+	previousRoot := constants.DefaultRuntimeRootDir
+	constants.DefaultRuntimeRootDir = t.TempDir()
+	t.Cleanup(func() { constants.DefaultRuntimeRootDir = previousRoot })
+
+	cfg := DefaultConfig()
+	cfg.ClusterName = "platform-test"
+	cfg.Masters = "192.0.2.10"
+	clusterDir := constants.ClusterDir(cfg.ClusterName)
+	require.NoError(t, os.MkdirAll(clusterDir, 0o700))
+	require.NoError(t, os.WriteFile(constants.Clusterfile(cfg.ClusterName), []byte("stale"), 0o600))
+
+	installer := Installer{Config: cfg, Runner: &remoteStateRunner{output: []byte("partial\n")}, Stdout: io.Discard}
+	err := installer.prepareClusterBootstrap(context.Background())
+	require.ErrorContains(t, err, "remote Kubernetes state")
+	require.FileExists(t, constants.Clusterfile(cfg.ClusterName))
 }
 
 func TestCloudRuntimeConfigCommand(t *testing.T) {
@@ -397,6 +440,20 @@ func TestWaitForDesktopAcceptsSealosDesktopPod(t *testing.T) {
 }
 
 type noopRunner struct{}
+
+type remoteStateRunner struct {
+	commands []Command
+	output   []byte
+}
+
+func (r *remoteStateRunner) Run(context.Context, Command) error {
+	return nil
+}
+
+func (r *remoteStateRunner) Output(_ context.Context, command Command) ([]byte, error) {
+	r.commands = append(r.commands, command)
+	return r.output, nil
+}
 
 type podOutputRunner struct {
 	output []byte

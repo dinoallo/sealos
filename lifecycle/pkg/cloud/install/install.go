@@ -953,6 +953,9 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	}
 
 	if !installed {
+		if err := i.prepareClusterBootstrap(ctx); err != nil {
+			return err
+		}
 		if err := i.run(ctx, i.kubernetesCommand(images.Kubernetes)); err != nil {
 			return err
 		}
@@ -1197,6 +1200,9 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 	i.info("Starting distribution bootstrap for %s", manifest.Ref())
 	i.info("Kubernetes installed=%t ready=%t Cilium ready=%t", installed, ready, ciliumReady)
 	if !installed {
+		if err := i.prepareClusterBootstrap(ctx); err != nil {
+			return err
+		}
 		if err := i.pullImage(ctx, kubernetesImage, ""); err != nil {
 			return err
 		}
@@ -1669,6 +1675,59 @@ func (i *Installer) clusterStatus(ctx context.Context) (bool, bool) {
 		return false, false
 	}
 	return true, nodesReady(output)
+}
+
+// prepareClusterBootstrap prevents a failed distribution installation from
+// reusing a local Clusterfile after the target was reset. Sealos decides
+// between create and install from that local file, while distribution install
+// determines the real state from the target's Kubernetes files.
+func (i *Installer) prepareClusterBootstrap(ctx context.Context) error {
+	if i.Config.DryRun || strings.TrimSpace(i.Config.Masters) == "" {
+		return nil
+	}
+	clusterDir := constants.ClusterDir(i.Config.ClusterName)
+	if _, err := os.Stat(constants.Clusterfile(i.Config.ClusterName)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect local cluster state: %w", err)
+	}
+
+	state, err := i.remoteKubernetesState(ctx)
+	if err != nil {
+		return fmt.Errorf("check remote Kubernetes state before bootstrap: %w", err)
+	}
+	switch state {
+	case "initialized":
+		return nil
+	case "partial":
+		return fmt.Errorf("remote Kubernetes state for cluster %q is incomplete; clean the target before retrying", i.Config.ClusterName)
+	case "absent":
+		backup := fmt.Sprintf("%s.stale-%d", clusterDir, time.Now().UnixNano())
+		if err := os.Rename(clusterDir, backup); err != nil {
+			return fmt.Errorf("archive stale local cluster state %s: %w", clusterDir, err)
+		}
+		i.info("Archived stale local cluster state at %s", backup)
+		return nil
+	default:
+		return fmt.Errorf("remote Kubernetes state check returned unexpected result %q", state)
+	}
+}
+
+func (i *Installer) remoteKubernetesState(ctx context.Context) (string, error) {
+	script := `if [ -f /etc/kubernetes/admin.conf ] && [ -f /etc/kubernetes/manifests/kube-apiserver.yaml ]; then
+  printf initialized
+elif [ -e /etc/kubernetes/admin.conf ] || [ -e /etc/kubernetes/manifests/kube-apiserver.yaml ]; then
+  printf partial
+else
+  printf absent
+fi`
+	args := i.withCluster([]string{"exec"})
+	args = append(args, "--roles", "master", "--capture-output", script)
+	output, err := i.Runner.Output(ctx, Command{Name: "sealos", Args: args})
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(output)), nil
 }
 
 func (i *Installer) ciliumStatus(ctx context.Context) bool {

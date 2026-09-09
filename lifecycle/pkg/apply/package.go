@@ -118,23 +118,47 @@ func addPackageRegistryHosts(cluster *v2.Cluster, mount v2.MountImage, hosts []s
 	if err != nil {
 		return nil, err
 	}
-	remote := ssh.NewRemoteFromSSH(cluster.Name, execer)
 	added := make([]string, 0, len(hosts))
 	remove := func() {
 		for _, host := range added {
-			if err := remote.HostsDelete(host, domain); err != nil {
+			if err := execer.CmdAsync(host, packageRegistryHostsDeleteCommand(domain)); err != nil {
 				continue
 			}
 		}
 	}
 	for _, host := range hosts {
-		if err := remote.HostsAdd(host, iputils.GetHostIP(registryIP), domain); err != nil {
+		if err := execer.CmdAsync(host, packageRegistryHostsAddCommand(iputils.GetHostIP(registryIP), domain)); err != nil {
 			remove()
 			return nil, err
 		}
 		added = append(added, host)
 	}
 	return remove, nil
+}
+
+func packageRegistryHostsAddCommand(ip, domain string) string {
+	marker := "sealos-package-registry:" + domain
+	return fmt.Sprintf(`set -eu
+marker=%s
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+awk -v marker="$marker" 'index($0, marker) == 0 { print }' /etc/hosts > "$tmp"
+printf '%%s %%s # %%s\n' %s %s "$marker" >> "$tmp"
+cat "$tmp" > /etc/hosts`, packageShellQuote(marker), packageShellQuote(ip), packageShellQuote(domain))
+}
+
+func packageRegistryHostsDeleteCommand(domain string) string {
+	marker := "sealos-package-registry:" + domain
+	return fmt.Sprintf(`set -eu
+marker=%s
+tmp=$(mktemp)
+trap 'rm -f "$tmp"' EXIT
+awk -v marker="$marker" 'index($0, marker) == 0 { print }' /etc/hosts > "$tmp"
+cat "$tmp" > /etc/hosts`, packageShellQuote(marker))
+}
+
+func packageShellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
 func packageExecutionClusterName(clusterName, image string) string {
