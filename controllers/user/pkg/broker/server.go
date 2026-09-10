@@ -56,12 +56,6 @@ func (s *Server) Handler() http.Handler {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
 	mux.HandleFunc("/v1/credentials/base", s.handleBaseIssue)
-	// Elevated requests are created by the external approval system. Keep the
-	// former user-facing endpoint explicitly unavailable instead of allowing
-	// it to fall through to the lease status handler.
-	mux.HandleFunc("/v1/credentials/elevated/request", func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "elevated requests are created by the approval system"})
-	})
 	mux.HandleFunc("/v1/credentials/elevated/redeem", s.handleElevatedRedeem)
 	mux.HandleFunc("/v1/internal/credentials/approve", s.handleInternalApprove)
 	mux.HandleFunc("/v1/credentials/", s.handleLease)

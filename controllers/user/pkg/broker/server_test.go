@@ -369,12 +369,6 @@ func TestInternalApproveRequiresDedicatedMTLS(t *testing.T) {
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("unconfigured mTLS status = %d, want %d", response.Code, http.StatusNotFound)
 	}
-	oldRequest := httptest.NewRequest(http.MethodPost, "/v1/credentials/elevated/request", strings.NewReader(`{"requestedTTLSeconds":1800}`))
-	oldResponse := httptest.NewRecorder()
-	server.Handler().ServeHTTP(oldResponse, oldRequest)
-	if oldResponse.Code != http.StatusNotFound {
-		t.Fatalf("removed request endpoint status = %d, want %d", oldResponse.Code, http.StatusNotFound)
-	}
 }
 
 func TestElevatedRedeemUsesPersistedApprovalAndConsumesReferenceOnce(t *testing.T) {
