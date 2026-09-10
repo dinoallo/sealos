@@ -174,9 +174,10 @@ sealos distribution install <distribution@version> --package-mode source
 sealos distribution install <distribution@version> --package-mode hybrid
 ```
 
-When a distribution contains multiple versions of the same bootstrap package, select the Cilium version explicitly
-with `--cilium-version` or `SEALOS_V2_CILIUM_VERSION`. The rc6 default is `v1.16.9`; set the option explicitly when
-using a distribution with a different available Cilium version.
+When a distribution contains multiple versions of the same bootstrap package, the first Cilium package selected by
+the distribution manifest is used by default. Override it explicitly with `--cilium-version` or
+`SEALOS_V2_CILIUM_VERSION`; for example, Cloud-Pro rc6 lists `v1.16.9` first, while the platform example selects
+its only Cilium package, `v1.17.1`.
 
 `source` remains supported for legacy packages. New packages should use ordered `sources`: the first available local
 checkout is preferred, and a Git source is cloned automatically when the local checkout is unavailable. `source.path`

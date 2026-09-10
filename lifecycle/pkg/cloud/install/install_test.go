@@ -114,7 +114,7 @@ func localPackageRepositoryPath(t *testing.T) string {
 func TestConfigValidation(t *testing.T) {
 	require.Equal(t, "cloud-pro@v5.1.2-rc6", DefaultConfig().Distribution)
 	require.Equal(t, "30000-50000", DefaultConfig().ServiceNodePortRange)
-	require.Equal(t, "v1.16.9", DefaultConfig().CiliumVersion)
+	require.Empty(t, DefaultConfig().CiliumVersion)
 	cfg := DefaultConfig()
 	cfg.Masters = "192.0.2.10:22"
 	cfg.CloudDomain = "cloud.example.com"
@@ -421,6 +421,26 @@ func TestInstallBootstrapsNonCloudDistribution(t *testing.T) {
 	require.Contains(t, output.String(), "sealos pull -q registry.example/cert-manager:v1.19.1")
 	require.Contains(t, output.String(), "sealos run --force registry.example/cert-manager:v1.19.1")
 	require.Contains(t, output.String(), "Distribution installation completed with all packages processed")
+}
+
+func TestInstallBootstrapsNonCloudDistributionSelectsManifestCiliumByDefault(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Masters = "192.0.2.10:22"
+	cfg.CloudDomain = "cloud.example.com"
+	cfg.DryRun = true
+	manifest := &distribution.Manifest{
+		Name:    "platform",
+		Version: "v0.1.0",
+		Packages: []distribution.Package{
+			{Name: "kubernetes", Version: "v1.28.15", Remote: distribution.Remote{Image: "registry.example/kubernetes:v1.28.15"}},
+			{Name: "cilium", Version: "v1.17.1", Remote: distribution.Remote{Image: "registry.example/cilium:v1.17.1"}},
+		},
+	}
+	var output bytes.Buffer
+	installer := Installer{Config: cfg, Runner: noopRunner{}, Stdout: &output}
+	require.NoError(t, installer.Install(context.Background(), manifest))
+	require.Equal(t, "v1.17.1", installer.Config.CiliumVersion)
+	require.Contains(t, output.String(), "sealos run --force registry.example/cilium:v1.17.1")
 }
 
 func TestInstallRejectsIncompleteCloudPackageSet(t *testing.T) {

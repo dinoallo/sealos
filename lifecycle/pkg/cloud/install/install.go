@@ -43,9 +43,10 @@ const (
 	DefaultCloudPort            = 443
 	DefaultSSHPort              = 22
 	DefaultServiceNodePortRange = "30000-50000"
-	DefaultCiliumVersion        = "v1.16.9"
-	DefaultWaitTimeout          = 30 * time.Minute
-	cloudRuntimeRoot            = "/root/.sealos/cloud"
+	// An empty version lets each distribution select its first Cilium package.
+	DefaultCiliumVersion = ""
+	DefaultWaitTimeout   = 30 * time.Minute
+	cloudRuntimeRoot     = "/root/.sealos/cloud"
 )
 
 const cloudRuntimeTools = `#!/usr/bin/env bash
@@ -919,6 +920,14 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	if err != nil {
 		return err
 	}
+	if strings.TrimSpace(i.Config.CiliumVersion) == "" {
+		for _, pkg := range manifest.Packages {
+			if pkg.Name == "cilium" {
+				i.Config.CiliumVersion = pkg.Version
+				break
+			}
+		}
+	}
 	if !i.Config.DryRun {
 		if err := os.MkdirAll(i.Config.ConfigDir, 0o700); err != nil {
 			return fmt.Errorf("create installer config directory: %w", err)
@@ -1175,6 +1184,9 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 			return fmt.Errorf("resolve Cilium package for distribution %s: %w", manifest.Ref(), err)
 		}
 		return fmt.Errorf("distribution %s could not resolve Kubernetes and Cilium images", manifest.Ref())
+	}
+	if strings.TrimSpace(i.Config.CiliumVersion) == "" {
+		i.Config.CiliumVersion = cilium.Package.Version
 	}
 	ciliumImage := cilium.Image
 	if cilium.Build != nil {
