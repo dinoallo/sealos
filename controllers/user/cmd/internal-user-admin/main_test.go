@@ -57,7 +57,7 @@ func TestParseAdminCLIArgsSupportsApprove(t *testing.T) {
 		"--broker-url", "https://broker.example",
 		"--client-cert-file", "/pki/client.crt",
 		"--client-key-file", "/pki/client.key",
-		"--approval-id", "feishu-approval-1",
+		"--approval-id", "approval-1",
 		"--approval-reason", "incident remediation",
 		"--issuer", "https://issuer.example",
 		"--subject", "alice",
@@ -66,7 +66,7 @@ func TestParseAdminCLIArgsSupportsApprove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if config.Operation != operationApprove || config.BrokerURL != "https://broker.example" || config.ApprovalID != "feishu-approval-1" || config.RequestedTTL != 1800 {
+	if config.Operation != operationApprove || config.BrokerURL != "https://broker.example" || config.ApprovalID != "approval-1" || config.RequestedTTL != 1800 {
 		t.Fatalf("config = %#v", config)
 	}
 }
@@ -293,12 +293,12 @@ func TestRunApproveCallsInternalBrokerEndpoint(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, expected := range []string{`"approvalID":"feishu-approval-1"`, `"subject":"alice"`, `"requestedTTLSeconds":1800`, `"approvalReason":"incident remediation"`} {
+		for _, expected := range []string{`"approvalID":"approval-1"`, `"subject":"alice"`, `"requestedTTLSeconds":1800`, `"approvalReason":"incident remediation"`} {
 			if !strings.Contains(string(body), expected) {
 				t.Fatalf("request body %q does not contain %q", body, expected)
 			}
 		}
-		return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`{"approvalID":"feishu-approval-1","approvalReference":"r1.approval-00000000000000000000000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","profile":"cluster-ops-write.v1","requestedTTLSeconds":1800,"approvalExpiresAt":"2026-09-10T00:00:00Z"}`)), Request: request}, nil
+		return &http.Response{StatusCode: http.StatusCreated, Body: io.NopCloser(strings.NewReader(`{"approvalID":"approval-1","approvalReference":"r1.approval-00000000000000000000000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","profile":"cluster-ops-write.v1","requestedTTLSeconds":1800,"approvalExpiresAt":"2026-09-10T00:00:00Z"}`)), Request: request}, nil
 	})
 	err := run(context.Background(), adminConfig{
 		Operation:      operationApprove,
@@ -307,7 +307,7 @@ func TestRunApproveCallsInternalBrokerEndpoint(t *testing.T) {
 		Subject:        "alice",
 		ClientCertFile: "/pki/client.crt",
 		ClientKeyFile:  "/pki/client.key",
-		ApprovalID:     "feishu-approval-1",
+		ApprovalID:     "approval-1",
 		ApprovalReason: "incident remediation",
 		RequestedTTL:   1800,
 		HTTPClient:     &http.Client{Transport: transport},

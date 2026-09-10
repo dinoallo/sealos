@@ -54,7 +54,7 @@ spec:
       port: 53
     - protocol: TCP
       port: 53
-  # Replace these documentation-only ranges with the exact Feishu API and
+  # Replace these documentation-only ranges with the exact external approval API and
   # SMTP relay egress ranges used by the installation. NetworkPolicy cannot
   # express a DNS hostname portably.
   - to:

@@ -309,7 +309,7 @@ func TestInternalApprovePersistsAwaitingLeaseAndIsIdempotent(t *testing.T) {
 	server := newTestServer(t, fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&userv1.CredentialLease{}).WithObjects(user).Build(), staticAuthenticator{principal: Principal{Issuer: identity.Issuer, Subject: identity.Subject}}, &recordingTokenIssuer{}, now)
 	clientCAPool, clientCertificate := testClientIdentity(t)
 	server.Config.InternalClientCA = clientCAPool
-	body := `{"approvalID":"feishu-instance-1","target":{"issuer":"https://issuer.example","subject":"alice"},"requestedTTLSeconds":1800,"approvalReason":"deploy incident remediation"}`
+	body := `{"approvalID":"approval-instance-1","target":{"issuer":"https://issuer.example","subject":"alice"},"requestedTTLSeconds":1800,"approvalReason":"deploy incident remediation"}`
 	serve := func(value string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/v1/internal/credentials/approve", strings.NewReader(value))
 		req.TLS = &tls.ConnectionState{PeerCertificates: []*x509.Certificate{clientCertificate}}
@@ -325,11 +325,11 @@ func TestInternalApprovePersistsAwaitingLeaseAndIsIdempotent(t *testing.T) {
 	if err := json.Unmarshal(first.Body.Bytes(), &approval); err != nil {
 		t.Fatal(err)
 	}
-	if approval.ApprovalID != "feishu-instance-1" || approval.Profile != userv1.ClusterOpsWriteProfile || approval.RequestedTTLSeconds != 1800 || approval.ApprovalReference == "" {
+	if approval.ApprovalID != "approval-instance-1" || approval.Profile != userv1.ClusterOpsWriteProfile || approval.RequestedTTLSeconds != 1800 || approval.ApprovalReference == "" {
 		t.Fatalf("approval response = %#v", approval)
 	}
 	lease := &userv1.CredentialLease{}
-	if err := server.LeaseClient.Get(context.Background(), types.NamespacedName{Namespace: userv1.CredentialBrokerNamespace, Name: approvalLeaseName("feishu-instance-1")}, lease); err != nil {
+	if err := server.LeaseClient.Get(context.Background(), types.NamespacedName{Namespace: userv1.CredentialBrokerNamespace, Name: approvalLeaseName("approval-instance-1")}, lease); err != nil {
 		t.Fatal(err)
 	}
 	if lease.Status.Phase != userv1.CredentialLeaseAwaitingRedemption || lease.Status.ApprovalExpirationTimestamp == nil || len(lease.Status.Conditions) != 0 {
@@ -375,13 +375,13 @@ func TestElevatedRedeemUsesPersistedApprovalAndConsumesReferenceOnce(t *testing.
 	now := time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)
 	identity := userv1.Identity{Issuer: "https://issuer.example", Subject: "alice"}
 	user := &userv1.InternalUser{ObjectMeta: metav1.ObjectMeta{Name: internalcredentials.DeriveInternalUserName(identity.Issuer, identity.Subject)}, Spec: userv1.InternalUserSpec{Identity: identity, RoleProfile: userv1.BaseReadonlyProfile}, Status: userv1.InternalUserStatus{Phase: userv1.InternalUserActive}}
-	leaseName := approvalLeaseName("feishu-instance-2")
+	leaseName := approvalLeaseName("approval-instance-2")
 	reference, err := newApprovalReference(leaseName)
 	if err != nil {
 		t.Fatal(err)
 	}
 	expires := metav1.NewTime(now.Add(time.Hour))
-	lease := &userv1.CredentialLease{ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: userv1.CredentialBrokerNamespace}, Spec: userv1.CredentialLeaseSpec{Target: identity, Requester: identity, Profile: userv1.ClusterOpsWriteProfile, RequestedTTLSeconds: 1800, ApprovalReference: reference, ApprovalID: "feishu-instance-2", ApprovalReason: "incident"}, Status: userv1.CredentialLeaseStatus{Phase: userv1.CredentialLeaseAwaitingRedemption, ApprovalExpirationTimestamp: &expires}}
+	lease := &userv1.CredentialLease{ObjectMeta: metav1.ObjectMeta{Name: leaseName, Namespace: userv1.CredentialBrokerNamespace}, Spec: userv1.CredentialLeaseSpec{Target: identity, Requester: identity, Profile: userv1.ClusterOpsWriteProfile, RequestedTTLSeconds: 1800, ApprovalReference: reference, ApprovalID: "approval-instance-2", ApprovalReason: "incident"}, Status: userv1.CredentialLeaseStatus{Phase: userv1.CredentialLeaseAwaitingRedemption, ApprovalExpirationTimestamp: &expires}}
 	client := fake.NewClientBuilder().WithScheme(testScheme()).WithStatusSubresource(&userv1.CredentialLease{}).WithObjects(user, lease).WithInterceptorFuncs(interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 		if subResourceName == "status" {
 			if candidate, ok := obj.(*userv1.CredentialLease); ok && candidate.Status.Phase == userv1.CredentialLeasePending {
