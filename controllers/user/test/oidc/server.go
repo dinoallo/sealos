@@ -45,6 +45,7 @@ type Config struct {
 	Issuer          string   `json:"issuer,omitempty"`
 	Users           []User   `json:"users,omitempty"`
 	Clients         []Client `json:"clients,omitempty"`
+	TokenAudience   string   `json:"token_audience,omitempty"`
 	TokenTTLSeconds int64    `json:"token_ttl_seconds,omitempty"`
 }
 
@@ -189,7 +190,7 @@ func (p *Provider) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	query := r.URL.Query()
 	client, ok := p.client(query.Get("client_id"))
-	if !ok || !contains(client.RedirectURIs, query.Get("redirect_uri")) {
+	if !ok || !redirectAllowed(client.RedirectURIs, query.Get("redirect_uri")) {
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "unknown client or redirect URI")
 		return
 	}
@@ -291,7 +292,11 @@ func (p *Provider) handleToken(w http.ResponseWriter, r *http.Request) {
 	ttl := p.tokenTTL()
 	now := time.Now().UTC()
 	expiresAt := now.Add(ttl)
-	accessToken, err := p.signJWT(issuer, user, authCode.clientID, now, expiresAt, nil)
+	accessAudience := authCode.clientID
+	if p.config.TokenAudience != "" {
+		accessAudience = p.config.TokenAudience
+	}
+	accessToken, err := p.signJWT(issuer, user, accessAudience, now, expiresAt, nil)
 	if err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to sign access token")
 		return
@@ -525,6 +530,31 @@ func hasScope(scope, wanted string) bool {
 func contains(items []string, wanted string) bool {
 	for _, item := range items {
 		if item == wanted {
+			return true
+		}
+	}
+	return false
+}
+
+func redirectAllowed(registered []string, requested string) bool {
+	if contains(registered, requested) {
+		return true
+	}
+	requestedURL, err := url.Parse(requested)
+	if err != nil || requestedURL.Fragment != "" || requestedURL.RawQuery != "" {
+		return false
+	}
+	for _, candidate := range registered {
+		registeredURL, err := url.Parse(candidate)
+		if err != nil || registeredURL.Fragment != "" || registeredURL.RawQuery != "" {
+			continue
+		}
+		if registeredURL.Scheme != "http" || requestedURL.Scheme != registeredURL.Scheme ||
+			registeredURL.Hostname() != requestedURL.Hostname() || registeredURL.Path != requestedURL.Path ||
+			registeredURL.Port() != "" || requestedURL.Port() == "" {
+			continue
+		}
+		if registeredURL.Hostname() == "127.0.0.1" || registeredURL.Hostname() == "::1" || registeredURL.Hostname() == "localhost" {
 			return true
 		}
 	}

@@ -1,0 +1,24 @@
+# Copyright 2026 labring.
+# Replace every placeholder and source CIDR before applying this manifest.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: internal-credential-broker-config
+  namespace: internal-credential-broker
+data:
+  oidc-issuer: https://replace-with-allowlisted-oidc-issuer.example
+  oidc-audience: sealos-internal-credential-broker
+  oidc-jwks-url: ""
+  kubernetes-audience: https://kubernetes.default.svc.cluster.local
+  cluster-server: https://replace-with-public-kubernetes-api.example
+  # Set this to /etc/broker/internal-client-ca/ca.crt and provision
+  # internal-credential-broker-client-ca to enable the internal approve
+  # endpoint. Keep it empty to leave that endpoint disabled.
+  internal-client-ca-file: ""
+  request-rate-limit: "10"
+  request-rate-burst: "20"
+  trusted-proxy-cidrs: 10.0.0.0/8
+  allowed-client-cidrs: 10.0.0.0/8
+  trusted-client-ip-header: X-Trusted-Client-IP
+  tls-cert-file: /etc/broker/tls/tls.crt
+  tls-key-file: /etc/broker/tls/tls.key

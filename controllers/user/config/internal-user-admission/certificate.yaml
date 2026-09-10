@@ -1,0 +1,22 @@
+# Copyright 2026 labring.
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: internal-user-admission-selfsigned
+  namespace: internal-user-controller
+spec:
+  selfSigned: {}
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-user-admission-cert
+  namespace: internal-user-controller
+spec:
+  secretName: internal-user-admission-cert
+  dnsNames:
+  - internal-user-admission.internal-user-controller.svc
+  - internal-user-admission.internal-user-controller.svc.cluster.local
+  issuerRef:
+    name: internal-user-admission-selfsigned
+    kind: Issuer

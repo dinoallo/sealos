@@ -1,0 +1,28 @@
+# Copyright 2026 labring.
+# Replace every placeholder before applying this manifest.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: internal-credential-approval-adapter-config
+  namespace: internal-credential-approval
+data:
+  listen-address: :8443
+  feishu-base-url: https://open.feishu.cn
+  feishu-app-id: replace-with-feishu-app-id
+  feishu-approval-code: replace-with-feishu-approval-definition-code
+  feishu-user-id-type: open_id
+  target-issuer: https://replace-with-allowlisted-oidc-issuer.example
+  subject-field: subject
+  ttl-field: requested_ttl_seconds
+  reason-field: reason
+  broker-url: https://internal-credential-broker.internal-credential-broker.svc
+  broker-server-name: internal-credential-broker.internal-credential-broker.svc
+  broker-ca-file: /etc/adapter/broker-ca/ca.crt
+  broker-client-cert-file: /etc/adapter/broker-client/tls.crt
+  broker-client-key-file: /etc/adapter/broker-client/tls.key
+  smtp-host: replace-with-approved-smtp-relay.example
+  smtp-port: "587"
+  smtp-from: internal-credential-broker@example.internal
+  smtp-subject: Internal Kubernetes credential approval
+  adapter-tls-cert-file: /etc/adapter/tls/tls.crt
+  adapter-tls-key-file: /etc/adapter/tls/tls.key

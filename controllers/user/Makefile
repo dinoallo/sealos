@@ -72,6 +72,30 @@ build:  ## Build manager binary.
 	[ -n "$(LICENSE_KEY)" ] && LD_FLAGS+=" -X ${CONTROLLER_LICENSE_PKG}.encryptionKey=${LICENSE_KEY}"; \
 	CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags "$${LD_FLAGS}" -trimpath -o bin/manager main.go
 
+.PHONY: build-internal-user-controller
+build-internal-user-controller: ## Build the standalone InternalUser/CredentialLease controller.
+	CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -buildvcs=false -ldflags "-s -w" -trimpath -o bin/internal-user-controller-${TARGETARCH} ./cmd/internal-user-controller
+
+.PHONY: build-broker
+build-broker: ## Build the standalone credential Broker.
+	CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -buildvcs=false -ldflags "-s -w" -trimpath -o bin/broker-${TARGETARCH} ./cmd/broker
+
+.PHONY: build-internal-user-cli
+build-internal-user-cli: ## Build the InternalUser credential CLI.
+	CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${TARGETARCH} go build -buildvcs=false -ldflags "-s -w" -trimpath -o bin/internal-user-cli-${TARGETARCH} ./cmd/internal-user-cli
+
+.PHONY: build-internal-user-admin
+build-internal-user-admin: ## Build the InternalUser administrator CLI.
+	CGO_ENABLED=0 GOOS=${GOOS} GOARCH=${TARGETARCH} go build -buildvcs=false -ldflags "-s -w" -trimpath -o bin/internal-user-admin-${TARGETARCH} ./cmd/internal-user-admin
+
+.PHONY: build-internal-user-admission
+build-internal-user-admission: ## Build the standalone ClusterRoleBinding admission webhook.
+	CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -buildvcs=false -ldflags "-s -w" -trimpath -o bin/internal-user-admission-${TARGETARCH} ./cmd/internal-user-admission
+
+.PHONY: build-internal-user-approval-adapter
+build-internal-user-approval-adapter: ## Build the stateless Feishu approval adapter.
+	CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -buildvcs=false -ldflags "-s -w" -trimpath -o bin/internal-user-approval-adapter-${TARGETARCH} ./cmd/internal-user-approval-adapter
+
 .PHONY: run
 run: manifests generate fmt vet ## Run a controller from your host.
 	go run ./main.go
