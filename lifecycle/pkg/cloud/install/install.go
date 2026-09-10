@@ -1203,12 +1203,14 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 		if err := i.prepareClusterBootstrap(ctx); err != nil {
 			return err
 		}
-		if err := i.pullImage(ctx, kubernetesImage, ""); err != nil {
-			return err
-		}
-		if err := i.capturePackageCleanupHook(ctx, kubernetesImage); err != nil {
-			return err
-		}
+	}
+	if err := i.pullImage(ctx, kubernetesImage, ""); err != nil {
+		return err
+	}
+	if err := i.capturePackageCleanupHook(ctx, kubernetesImage); err != nil {
+		return err
+	}
+	if !installed {
 		packageImage, err := i.imageHasPackageInit(ctx, kubernetesImage)
 		if err != nil {
 			return err
@@ -1221,20 +1223,25 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 		if err := i.run(ctx, i.kubernetesCommand(kubernetesImage)); err != nil {
 			return err
 		}
-		i.cleanupImage(ctx, kubernetesImage)
 	}
+	i.cleanupImage(ctx, kubernetesImage)
 	if err := i.ensureServiceNodePortRange(ctx); err != nil {
 		return err
 	}
 	if err := i.prepareCloudRuntimeConfig(ctx); err != nil {
 		return err
 	}
+	if err := i.pullImage(ctx, ciliumImage, ""); err != nil {
+		return err
+	}
+	if err := i.capturePackageCleanupHook(ctx, ciliumImage); err != nil {
+		return err
+	}
 	if !ciliumReady {
-		if err := i.pullImage(ctx, ciliumImage, ""); err != nil {
-			return err
-		}
-		if err := i.capturePackageCleanupHook(ctx, ciliumImage); err != nil {
-			return err
+		if !i.Config.DryRun {
+			if err := i.waitKubernetesAPI(ctx); err != nil {
+				return err
+			}
 		}
 		packageImage, err := i.imageHasPackageInit(ctx, ciliumImage)
 		if err != nil {
@@ -1247,13 +1254,13 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 		if err := i.run(ctx, command); err != nil {
 			return err
 		}
-		i.cleanupImage(ctx, ciliumImage)
 		if !i.Config.DryRun {
 			if err := i.waitCiliumReady(ctx); err != nil {
 				return fmt.Errorf("wait for Cilium package readiness: %w", err)
 			}
 		}
 	}
+	i.cleanupImage(ctx, ciliumImage)
 	if !ready && !i.Config.DryRun {
 		if err := i.waitClusterReady(ctx); err != nil {
 			return err
@@ -1781,6 +1788,25 @@ func (i *Installer) waitClusterReady(ctx context.Context) error {
 			return ctx.Err()
 		case <-deadline.C:
 			return fmt.Errorf("timed out waiting for Kubernetes nodes to become ready")
+		case <-ticker.C:
+		}
+	}
+}
+
+func (i *Installer) waitKubernetesAPI(ctx context.Context) error {
+	deadline := time.NewTimer(i.Config.WaitTimeout)
+	defer deadline.Stop()
+	ticker := time.NewTicker(3 * time.Second)
+	defer ticker.Stop()
+	for {
+		if _, err := i.Runner.Output(ctx, i.clusterStatusCommand()); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-deadline.C:
+			return fmt.Errorf("timed out waiting for Kubernetes API")
 		case <-ticker.C:
 		}
 	}
