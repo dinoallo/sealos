@@ -34,70 +34,49 @@ func TestDistributionInstallRejectsMissingNonInteractiveValues(t *testing.T) {
 }
 
 func TestDistributionInstallDryRun(t *testing.T) {
-	repository := t.TempDir()
-	manifestDir := filepath.Join(repository, "distributions", "cloud")
-	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
+	configPath := filepath.Join(t.TempDir(), "install.yaml")
 	var manifest strings.Builder
-	manifest.WriteString("name: cloud\nversion: v5.1.0\npackages:\n")
+	manifest.WriteString("cluster: prod\nmasters: 192.0.2.10:22\ncloudDomain: 192.0.2.10.nip.io\ndryRun: true\n")
+	manifest.WriteString("distributionManifest:\n  name: cloud\n  version: v5.1.0\n  packages:\n")
 	for _, image := range testDistributionImages {
 		name, version := packageNameAndVersion(image)
-		fmt.Fprintf(&manifest, "  - name: %s\n    version: %s\n    remote:\n      image: %s\n", name, version, image)
+		fmt.Fprintf(&manifest, "    - ref: %s@%s\n      remote:\n        image: %s\n", name, version, image)
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v5.1.0.yaml"), []byte(manifest.String()), 0o644))
+	require.NoError(t, os.WriteFile(configPath, []byte(manifest.String()), 0o600))
 
 	cmd := newDistributionInstallCmd()
 	var output bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&output)
 	cmd.SetArgs([]string{
-		"cloud@v5.1.0",
 		"--interactive=false",
-		"--masters", "192.0.2.10:22",
-		"--cluster", "prod",
-		"--cloud-domain", "192.0.2.10.nip.io",
-		"--dry-run",
+		"--config", configPath,
 		"--config-dir", "/tmp/sealos-cli-install-test",
-		"--repo-cache", repository,
-		"--offline",
 	})
 
 	require.NoError(t, cmd.Execute())
 	require.Contains(t, output.String(), "Sealos Cloud installation completed")
-	require.Contains(t, output.String(), "sealos-finish:v0.1.0")
-	require.Contains(t, output.String(), "--cluster prod")
 }
 
 func TestDistributionInstallConfigFile(t *testing.T) {
-	repository := t.TempDir()
-	manifestDir := filepath.Join(repository, "distributions", "cloud")
-	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
+	configPath := filepath.Join(t.TempDir(), "install.yaml")
 	var manifest strings.Builder
-	manifest.WriteString("name: cloud\nversion: v1.0.0\npackages:\n")
+	manifest.WriteString("cluster: configured\nmasters: 192.0.2.10:22\ncloudDomain: config.example.com\ndryRun: true\n")
+	manifest.WriteString("distributionManifest:\n  name: cloud\n  version: v1.0.0\n  packages:\n")
 	for _, image := range testDistributionImages {
 		name, version := packageNameAndVersion(image)
-		fmt.Fprintf(&manifest, "  - name: %s\n    version: %s\n    remote:\n      image: %s\n", name, version, image)
+		fmt.Fprintf(&manifest, "    - ref: %s@%s\n      remote:\n        image: %s\n", name, version, image)
 	}
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte(manifest.String()), 0o644))
-
-	configPath := filepath.Join(t.TempDir(), "install.yaml")
-	require.NoError(t, os.WriteFile(configPath, []byte(`
-cluster: configured
-masters: 192.0.2.10:22
-cloudDomain: config.example.com
-dryRun: true
-`), 0o600))
+	require.NoError(t, os.WriteFile(configPath, []byte(manifest.String()), 0o600))
 
 	cmd := newDistributionInstallCmd()
 	var output bytes.Buffer
 	cmd.SetOut(&output)
 	cmd.SetErr(&output)
 	cmd.SetArgs([]string{
-		"cloud@v1.0.0",
 		"--interactive=false",
 		"--config", configPath,
 		"--cloud-domain", "cli.example.com",
-		"--repo-cache", repository,
-		"--offline",
 	})
 
 	require.NoError(t, cmd.Execute())

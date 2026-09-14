@@ -22,13 +22,22 @@ import (
 
 var ErrNotFound = errors.New("distribution manifest not found")
 
+// Manifest is a distribution manifest that selects packages from a package
+// repository and optionally pins them to remote container images.
 type Manifest struct {
-	Name        string    `json:"name" yaml:"name"`
-	Version     string    `json:"version" yaml:"version"`
-	Description string    `json:"description,omitempty" yaml:"description,omitempty"`
-	Packages    []Package `json:"packages" yaml:"packages"`
+	Name        string                `json:"name" yaml:"name"`
+	Version     string                `json:"version" yaml:"version"`
+	Description string                `json:"description,omitempty" yaml:"description,omitempty"`
+	// PackageRepo is a Git URL or local filesystem path to a package
+	// repository. It is optional: when omitted, source/hybrid resolution
+	// modes fail and only remote resolution is available. When set, the
+	// repository is used to look up package metadata (dependsOn) and
+	// build context (Kubefile) for source-mode builds.
+	PackageRepo string                `json:"packageRepo,omitempty" yaml:"packageRepo,omitempty"`
+	Packages    []DistributionPackage `json:"packages" yaml:"packages"`
 }
 
+// Summary is a compact distribution reference for listing purposes.
 type Summary struct {
 	Name    string `json:"name" yaml:"name"`
 	Version string `json:"version" yaml:"version"`
@@ -73,17 +82,23 @@ func (m Manifest) Validate() error {
 		return errors.New("distribution packages are required")
 	}
 	seen := make(map[string]struct{}, len(m.Packages))
-	for i, pkg := range m.Packages {
-		if err := pkg.Validate(); err != nil {
-			return fmt.Errorf("distribution package %d: %w", i, err)
+	for i, dp := range m.Packages {
+		name, version, err := ParseRef(dp.Ref)
+		if err != nil {
+			return fmt.Errorf("distribution package %d: invalid ref %q: %w", i, dp.Ref, err)
 		}
-		if _, ok := seen[pkg.Ref()]; ok {
-			return fmt.Errorf("duplicate distribution package %q", pkg.Ref())
+		if _, ok := seen[dp.Ref]; ok {
+			return fmt.Errorf("duplicate distribution package %q", dp.Ref)
 		}
-		seen[pkg.Ref()] = struct{}{}
-	}
-	if _, err := orderPackages(m.Packages); err != nil {
-		return fmt.Errorf("invalid distribution package dependencies: %w", err)
+		seen[dp.Ref] = struct{}{}
+		// Validate remote image if present
+		if dp.Remote != nil {
+			if err := validateRemote(*dp.Remote); err != nil {
+				return fmt.Errorf("distribution package %s remote: %w", dp.Ref, err)
+			}
+		}
+		_ = name
+		_ = version
 	}
 	return nil
 }

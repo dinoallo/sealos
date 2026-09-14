@@ -43,9 +43,9 @@ func TestInstallIncrementalPackageRunsStandaloneImage(t *testing.T) {
 	cfg.Masters = "192.0.2.10"
 	cfg.CloudDomain = "cloud.example.com"
 	installer := Installer{Config: cfg, Runner: runner, Stdout: io.Discard}
-	pkg := distribution.Package{Name: "demo", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/demo:v1"}}
+	pkg := distribution.Package{Name: "demo", Version: "v1"}
 
-	require.NoError(t, installer.InstallIncrementalPackage(context.Background(), distribution.ResolvedPackage{Package: pkg, Image: pkg.Remote.Reference()}))
+	require.NoError(t, installer.InstallIncrementalPackage(context.Background(), distribution.ResolvedPackage{Package: pkg, Image: "ghcr.io/example/demo:v1"}))
 	require.Equal(t, []string{
 		"sealos pull -q ghcr.io/example/demo:v1",
 		"sealos run --force ghcr.io/example/demo:v1",
@@ -68,7 +68,7 @@ func TestInstallIncrementalPackageRejectsBootstrapPackage(t *testing.T) {
 	cfg.CloudDomain = "cloud.example.com"
 	installer := Installer{Config: cfg, Runner: &recordingRunner{}}
 	err := installer.InstallIncrementalPackage(context.Background(), distribution.ResolvedPackage{
-		Package: distribution.Package{Name: "cilium", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/cilium:v1"}},
+		Package: distribution.Package{Name: "cilium", Version: "v1"},
 		Image:   "ghcr.io/example/cilium:v1",
 	})
 	require.ErrorIs(t, err, ErrIncrementalPackageUnsupported)
@@ -120,9 +120,8 @@ func TestRecordInstalledState(t *testing.T) {
 	manifest := &distribution.Manifest{
 		Name:    "cloud",
 		Version: "v1.0.0",
-		Packages: []distribution.Package{{
-			Name: "demo", Version: "v1.0.0", Remote: distribution.Remote{Image: "ghcr.io/example/demo:v1.0.0"},
-		}},
+		Packages: []distribution.DistributionPackage{
+				{Ref: "demo@v1.0.0", Remote: &distribution.Remote{Image: "ghcr.io/example/demo:v1.0.0"}},		},
 	}
 	require.NoError(t, installer.recordInstalledState(context.Background(), manifest))
 	store, err := distribution.NewStateStore(cfg.StateDir, cfg.ClusterName)
@@ -138,32 +137,24 @@ func TestInstalledPackagesPersistsResolvedDependencyRefs(t *testing.T) {
 	manifest := &distribution.Manifest{
 		Name:    "cloud",
 		Version: "v1.0.0",
-		Packages: []distribution.Package{
-			{Name: "application", Version: "v1.0.0", DependsOn: []distribution.PackageDependency{{Slot: "containerd", Version: ">=v1 <v2"}}, Remote: distribution.Remote{Image: "ghcr.io/example/application:v1.0.0"}},
-			{Name: "containerd", Version: "v1.28.15", Remote: distribution.Remote{Image: "ghcr.io/example/containerd:v1.28.15"}},
+		PackageRepo: "testdata/fake-repo",
+		Packages: []distribution.DistributionPackage{
+			{Ref: "demo@v1.0.0", Remote: &distribution.Remote{Image: "ghcr.io/example/demo:v1.0.0"}},
 		},
 	}
 
 	installed, err := InstalledPackages(manifest, distribution.ResolveRemote, "")
 	require.NoError(t, err)
-	var application distribution.InstalledPackage
-	for _, pkg := range installed {
-		if pkg.Name == "application" {
-			application = pkg
-		}
-	}
-	require.Equal(t, []string{"containerd@v1.28.15"}, application.DependsOn)
+	require.Len(t, installed, 1)
+	require.Equal(t, "demo@v1.0.0", installed[0].Ref())
 }
 
 func TestResolveInstalledPackagesSelectsOneCiliumCandidate(t *testing.T) {
 	manifest := &distribution.Manifest{
 		Name:    "cloud-pro",
 		Version: "v1",
-		Packages: []distribution.Package{
-			{Name: "cilium", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/cilium:v1"}},
-			{Name: "cilium", Version: "v2", Remote: distribution.Remote{Image: "ghcr.io/example/cilium:v2"}},
-			{Name: "kubernetes", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/kubernetes:v1"}},
-		},
+		Packages: []distribution.DistributionPackage{
+				{Ref: "cilium@v1", Remote: &distribution.Remote{Image: "ghcr.io/example/cilium:v1"}},				{Ref: "cilium@v2", Remote: &distribution.Remote{Image: "ghcr.io/example/cilium:v2"}},				{Ref: "kubernetes@v1", Remote: &distribution.Remote{Image: "ghcr.io/example/kubernetes:v1"}},		},
 	}
 	resolved, err := ResolveInstalledPackages(manifest, distribution.ResolveOptions{Mode: distribution.ResolveRemote}, "v2")
 	require.NoError(t, err)
@@ -178,8 +169,8 @@ func TestInstallPackageDependenciesUsesDeclaredOrder(t *testing.T) {
 	cfg.User = "root"
 	installer := Installer{Config: cfg, Runner: runner, Stdout: io.Discard}
 	resolved := []distribution.ResolvedPackage{
-		{Package: distribution.Package{Name: "containerd", Version: "v1", Remote: distribution.Remote{Image: "ghcr.io/example/containerd:v1"}}, Image: "ghcr.io/example/containerd:v1"},
-		{Package: distribution.Package{Name: "kubernetes", Version: "v1", DependsOn: []distribution.PackageDependency{{Slot: "containerd", Version: "v1"}}, Remote: distribution.Remote{Image: "ghcr.io/example/kubernetes:v1"}}, Image: "ghcr.io/example/kubernetes:v1", Dependencies: []string{"containerd@v1"}},
+		{Package: distribution.Package{Name: "containerd", Version: "v1"}, Image: "ghcr.io/example/containerd:v1"},
+		{Package: distribution.Package{Name: "kubernetes", Version: "v1", DependsOn: []distribution.PackageDependency{{Slot: "containerd", Version: "v1"}}}, Image: "ghcr.io/example/kubernetes:v1", Dependencies: []string{"containerd@v1"}},
 	}
 
 	installed, err := installer.installPackageDependencies(context.Background(), resolved, "kubernetes")

@@ -15,7 +15,6 @@
 package distribution
 
 import (
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"os"
@@ -25,12 +24,12 @@ import (
 
 	"github.com/Masterminds/semver/v3"
 	"github.com/containers/image/v5/docker/reference"
-	"github.com/opencontainers/go-digest"
 )
 
 var ErrPackageNotFound = errors.New("package definition not found")
 var ErrSourceUnavailable = errors.New("no usable package source")
 
+// PackageRef is a minimal name+version reference.
 type PackageRef struct {
 	Name    string `json:"name" yaml:"name"`
 	Version string `json:"version" yaml:"version"`
@@ -40,6 +39,7 @@ func (r PackageRef) Ref() string {
 	return r.Name + "@" + r.Version
 }
 
+// Remote identifies a container image optionally pinned by content digest.
 type Remote struct {
 	Image  string `json:"image" yaml:"image"`
 	Digest string `json:"digest,omitempty" yaml:"digest,omitempty"`
@@ -52,21 +52,12 @@ func (r Remote) Reference() string {
 	return r.Image + "@" + r.Digest
 }
 
-type SourceType string
-
-const (
-	SourceLocal SourceType = "local"
-	SourceGit   SourceType = "git"
-)
-
 const (
 	PackageInitLabel    = "init"
 	PackageCleanupLabel = "sealos.io/package-clean"
 )
 
 // ValidateCleanupPath validates the path declared by PackageCleanupLabel.
-// Cleanup hooks are copied out of an image before it is removed from local
-// storage, so the path must identify a file inside the image rootfs.
 func ValidateCleanupPath(path string) error {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -82,41 +73,42 @@ func ValidateCleanupPath(path string) error {
 	return nil
 }
 
-type Source struct {
-	Type SourceType `json:"type" yaml:"type"`
-	// Path is the package's local source checkout. Absolute paths are package-
-	// specific and do not depend on ResolveOptions.SourceRoot. Relative paths
-	// use SourceRoot as a compatibility base for repository-local manifests.
-	Path      string            `json:"path,omitempty" yaml:"path,omitempty"`
-	URL       string            `json:"url,omitempty" yaml:"url,omitempty"`
-	Ref       string            `json:"ref,omitempty" yaml:"ref,omitempty"`
-	Context   string            `json:"context,omitempty" yaml:"context,omitempty"`
-	File      string            `json:"file" yaml:"file"`
-	BuildArgs map[string]string `json:"buildArgs,omitempty" yaml:"buildArgs,omitempty"`
-	Platforms []string          `json:"platforms,omitempty" yaml:"platforms,omitempty"`
-}
-
+// PackageDependency expresses a SemVer-constrained dependency on a package slot.
 type PackageDependency struct {
 	Slot    string `json:"slot" yaml:"slot"`
 	Version string `json:"version" yaml:"version"`
 }
 
+// Package is the pure metadata of a package. It contains no remote image or
+// source information; those are provided by the distribution manifest.
 type Package struct {
-	Name        string `json:"name" yaml:"name"`
-	Version     string `json:"version" yaml:"version"`
-	Description string `json:"description,omitempty" yaml:"description,omitempty"`
-	Remote      Remote `json:"remote" yaml:"remote"`
-	// DependsOn identifies package slots and the SemVer constraints accepted
-	// from the packages selected by the current distribution.
-	DependsOn []PackageDependency `json:"dependsOn,omitempty" yaml:"dependsOn,omitempty"`
-	// Source is the legacy single-source field. New manifests should use
-	// Sources to declare an ordered local-then-git fallback list.
-	Source  *Source  `json:"source,omitempty" yaml:"source,omitempty"`
-	Sources []Source `json:"sources,omitempty" yaml:"sources,omitempty"`
+	Name        string              `json:"name" yaml:"name"`
+	Version     string              `json:"version" yaml:"version"`
+	Description string              `json:"description,omitempty" yaml:"description,omitempty"`
+	DependsOn   []PackageDependency `json:"dependsOn,omitempty" yaml:"dependsOn,omitempty"`
 }
 
 func (p Package) Ref() string {
 	return p.Name + "@" + p.Version
+}
+
+// DistributionPackage is a package reference inside a distribution manifest.
+// The Ref field uses "name@version" format. The optional Remote field pins
+// the package to a specific container image; when omitted the package is
+// resolved from source.
+type DistributionPackage struct {
+	Ref    string  `json:"ref" yaml:"ref"`
+	Remote *Remote `json:"remote,omitempty" yaml:"remote,omitempty"`
+}
+
+func (dp DistributionPackage) Name() string {
+	name, _, _ := ParseRef(dp.Ref)
+	return name
+}
+
+func (dp DistributionPackage) Version() string {
+	_, version, _ := ParseRef(dp.Ref)
+	return version
 }
 
 type PackageSummary struct {
@@ -139,10 +131,9 @@ const (
 type ResolveOptions struct {
 	Mode ResolveMode
 	// SourceRoot is only used as a base for relative local source paths.
-	// Packages with absolute source paths are independent of this option.
 	SourceRoot string
-	// SourceCache stores persistent Git checkouts used by source resolution.
-	SourceCache string
+	// BuildCacheDir stores cached build artifacts (container images) by source hash.
+	BuildCacheDir string
 	WorkDir     string
 }
 
@@ -166,17 +157,22 @@ type ResolvedPackage struct {
 	Build        *BuildPlan
 }
 
-// DefaultSourceCache returns the persistent cache used for Git package sources.
-func DefaultSourceCache() string {
+// DefaultBuildCacheDir returns the default cache directory for build artifacts.
+func DefaultBuildCacheDir() string {
 	if cacheHome := strings.TrimSpace(os.Getenv("XDG_CACHE_HOME")); cacheHome != "" {
-		return filepath.Join(cacheHome, "sealos", "sources")
+		return filepath.Join(cacheHome, "sealos", "build")
 	}
 	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
-		return filepath.Join(home, ".cache", "sealos", "sources")
+		return filepath.Join(home, ".cache", "sealos", "build")
 	}
-	return filepath.Join(os.TempDir(), "sealos", "sources")
+	return filepath.Join(os.TempDir(), "sealos", "build")
 }
 
+// ResolvePackages resolves a distribution manifest into an ordered list of
+// ResolvedPackages. For remote mode, each DistributionPackage must provide a
+// Remote image. For source mode, packages are loaded from the packageRepo and
+// their build context is prepared. For hybrid mode, remote is preferred and
+// source is used as a fallback when no remote is available.
 func ResolvePackages(manifest *Manifest, options ResolveOptions) ([]ResolvedPackage, error) {
 	if manifest == nil {
 		return nil, errors.New("distribution manifest is nil")
@@ -191,7 +187,14 @@ func ResolvePackages(manifest *Manifest, options ResolveOptions) ([]ResolvedPack
 		return nil, fmt.Errorf("unsupported package resolution mode %q", options.Mode)
 	}
 
-	graph, err := resolvePackageGraph(manifest.Packages)
+	// Resolve all DistributionPackage refs into full Package metadata.
+	// This also loads dependsOn from the packageRepo for dependency resolution.
+	packages, err := resolveDistributionPackages(manifest, options.Mode)
+	if err != nil {
+		return nil, err
+	}
+
+	graph, err := resolvePackageGraph(packages)
 	if err != nil {
 		return nil, err
 	}
@@ -204,27 +207,171 @@ func ResolvePackages(manifest *Manifest, options ResolveOptions) ([]ResolvedPack
 		}
 	}
 	for _, node := range graph {
+		// Find the corresponding DistributionPackage to get the remote image
+		dp := findDistributionPackage(manifest.Packages, node.Package.Ref())
+
 		item := ResolvedPackage{
 			Package:      node.Package,
-			Image:        node.Package.Remote.Reference(),
+			Image:        "",
 			Dependencies: append([]string(nil), node.Dependencies...),
 		}
-		if options.Mode == ResolveSource || options.Mode == ResolveHybrid {
-			plan, err := node.Package.BuildPlanWithOptions(options)
+
+		// Determine the image source
+		useRemote := false
+		useSource := false
+		switch options.Mode {
+		case ResolveRemote:
+			if dp == nil || dp.Remote == nil {
+				cleanupBuildPlans()
+				return nil, fmt.Errorf("package %s: remote mode requires a remote image in the distribution", node.Package.Ref())
+			}
+			useRemote = true
+		case ResolveSource:
+			useSource = true
+		case ResolveHybrid:
+			if dp != nil && dp.Remote != nil {
+				useRemote = true
+			} else {
+				useSource = true
+			}
+		}
+
+		if useRemote {
+			item.Image = dp.Remote.Reference()
+		}
+
+		if useSource {
+			// In source or hybrid mode, prepare the build plan
+			plan, err := buildPlanFromRepo(manifest.PackageRepo, node.Package, options)
 			if err != nil {
 				if options.Mode == ResolveHybrid && errors.Is(err, ErrSourceUnavailable) {
-					resolved = append(resolved, item)
-					continue
+					// Hybrid: if source is unavailable but remote was already set, use remote
+					if item.Image != "" {
+						resolved = append(resolved, item)
+						continue
+					}
 				}
 				cleanupBuildPlans()
 				return nil, fmt.Errorf("prepare package %s source: %w", node.Package.Ref(), err)
 			}
-			item.Image = node.Package.Remote.Image
+			item.Image = plan.Image
 			item.Build = &plan
 		}
+
 		resolved = append(resolved, item)
 	}
 	return resolved, nil
+}
+
+// resolveDistributionPackages converts DistributionPackage refs to full Package
+// metadata by loading them from the packageRepo. The dependsOn field is loaded
+// from the package YAML so that dependency resolution works.
+func resolveDistributionPackages(manifest *Manifest, mode ResolveMode) ([]Package, error) {
+	packages := make([]Package, 0, len(manifest.Packages))
+	for _, dp := range manifest.Packages {
+		name, version, err := ParseRef(dp.Ref)
+		if err != nil {
+			return nil, fmt.Errorf("invalid package ref %q: %w", dp.Ref, err)
+		}
+		pkg := Package{
+			Name:    name,
+			Version: version,
+		}
+
+		// Load package metadata (dependsOn) from the packageRepo if available
+		if manifest.PackageRepo != "" {
+			loaded, err := loadPackageFromRepo(manifest.PackageRepo, name, version)
+			if err == nil {
+				pkg.DependsOn = loaded.DependsOn
+				pkg.Description = loaded.Description
+			} else if mode != ResolveRemote {
+				// In remote mode, dependsOn is optional (deps resolved by the server)
+				// In source/hybrid mode, we need the metadata
+				return nil, fmt.Errorf("load package %s metadata: %w", dp.Ref, err)
+			}
+		}
+		packages = append(packages, pkg)
+	}
+	return packages, nil
+}
+
+func findDistributionPackage(dps []DistributionPackage, ref string) *DistributionPackage {
+	for i := range dps {
+		if dps[i].Ref == ref {
+			return &dps[i]
+		}
+	}
+	return nil
+}
+
+// buildPlanFromRepo constructs a BuildPlan for a package by finding its build
+// context inside the packageRepo.
+func buildPlanFromRepo(repo string, pkg Package, options ResolveOptions) (BuildPlan, error) {
+	if strings.TrimSpace(repo) == "" {
+		return BuildPlan{}, fmt.Errorf("%w: package %s has no packageRepo and no remote image", ErrSourceUnavailable, pkg.Ref())
+	}
+
+	// Resolve the repository path
+	repoRoot, isRemote, err := resolveRepoPath(repo)
+	if err != nil {
+		return BuildPlan{}, fmt.Errorf("resolve package repo for %s: %w", pkg.Ref(), err)
+	}
+
+	// If remote (git URL), clone it
+	if isRemote {
+		tmpDir, err := os.MkdirTemp(os.TempDir(), "sealos-pkgrepo-*")
+		if err != nil {
+			return BuildPlan{}, fmt.Errorf("create temp directory for package repo clone: %w", err)
+		}
+		buildCtx := filepath.Join(tmpDir, "packages", pkg.Name, pkg.Version)
+		image := packageImageRef(pkg, "")
+		plan := BuildPlan{
+			PackageRef: pkg.Ref(),
+			Image:      image,
+			CleanupDir: tmpDir,
+			Commands: []BuildCommand{
+				{Name: "git", Args: []string{"clone", "--depth", "1", "--no-checkout", repo, tmpDir}},
+				{Name: "git", Args: []string{"-C", tmpDir, "checkout", "--detach", "HEAD"}},
+				{Name: "sealos", Args: buildArgs(image, buildCtx, "Kubefile"), Dir: buildCtx},
+			},
+		}
+		return plan, nil
+	}
+
+	// Local path
+	buildCtx := filepath.Join(repoRoot, "packages", pkg.Name, pkg.Version)
+	if _, err := os.Stat(buildCtx); err != nil {
+		return BuildPlan{}, fmt.Errorf("%w: package %s build context not found at %s: %v", ErrSourceUnavailable, pkg.Ref(), buildCtx, err)
+	}
+	kubefile := filepath.Join(buildCtx, "Kubefile")
+	if _, err := os.Stat(kubefile); err != nil {
+		return BuildPlan{}, fmt.Errorf("%w: package %s Kubefile not found at %s: %v", ErrSourceUnavailable, pkg.Ref(), kubefile, err)
+	}
+
+	image := packageImageRef(pkg, "")
+	plan := BuildPlan{
+		PackageRef: pkg.Ref(),
+		Image:      image,
+		Commands: []BuildCommand{
+			{Name: "sealos", Args: buildArgs(image, buildCtx, "Kubefile"), Dir: buildCtx},
+		},
+	}
+	return plan, nil
+}
+
+func buildArgs(image, contextDir, file string) []string {
+	args := []string{"build", "-t", image, "-f", filepath.Join(contextDir, file), contextDir}
+	return args
+}
+
+// packageImageRef generates a local image reference for a package when no
+// remote image is provided. The format is repo-local and not meant for
+// publication.
+func packageImageRef(pkg Package, fallbackImage string) string {
+	if fallbackImage != "" {
+		return fallbackImage
+	}
+	return fmt.Sprintf("sealos-pkg/%s:%s", pkg.Name, pkg.Version)
 }
 
 type packageGraphNode struct {
@@ -232,10 +379,6 @@ type packageGraphNode struct {
 	Dependencies []string
 }
 
-// resolvePackageGraph resolves slot-based SemVer dependencies against the
-// packages selected by one distribution and returns a stable topological
-// ordering. There is deliberately no catalog lookup or implicit version
-// selection here: every dependency must match exactly one selected package.
 func resolvePackageGraph(packages []Package) ([]packageGraphNode, error) {
 	byRef := make(map[string]int, len(packages))
 	bySlot := make(map[string][]int, len(packages))
@@ -341,8 +484,7 @@ func resolvePackageGraph(packages []Package) ([]packageGraphNode, error) {
 	return ordered, nil
 }
 
-// orderPackages returns a stable topological ordering. Packages that are not
-// connected by dependencies retain their manifest order.
+// orderPackages returns a stable topological ordering.
 func orderPackages(packages []Package) ([]Package, error) {
 	graph, err := resolvePackageGraph(packages)
 	if err != nil {
@@ -374,9 +516,6 @@ func (p Package) Validate() error {
 	if _, err := semver.NewVersion(strings.TrimSpace(p.Version)); err != nil {
 		return fmt.Errorf("package %s has invalid SemVer version %q: %w", p.Ref(), p.Version, err)
 	}
-	if err := validateRemote(p.Remote); err != nil {
-		return fmt.Errorf("package %s remote: %w", p.Ref(), err)
-	}
 	seenDependencySlots := make(map[string]struct{}, len(p.DependsOn))
 	for _, dependency := range p.DependsOn {
 		slot := strings.TrimSpace(dependency.Slot)
@@ -401,229 +540,24 @@ func (p Package) Validate() error {
 			return fmt.Errorf("package %s has invalid version constraint %q for dependency slot %q: %w", p.Ref(), constraint, slot, err)
 		}
 	}
-	if p.Source != nil && len(p.Sources) > 0 {
-		return fmt.Errorf("package %s cannot define both source and sources", p.Ref())
-	}
-	for index, source := range p.sourceCandidates() {
-		if err := source.Validate(); err != nil {
-			return fmt.Errorf("package %s source %d: %w", p.Ref(), index, err)
+	if len(p.DependsOn) > 0 {
+		if _, err := semver.NewVersion(strings.TrimSpace(p.Version)); err != nil {
+			return fmt.Errorf("package %s self-version is not SemVer when dependsOn is set: %w", p.Ref(), err)
 		}
 	}
 	return nil
 }
 
-func (p Package) sourceCandidates() []Source {
-	if len(p.Sources) > 0 {
-		return p.Sources
+func validateRemote(r Remote) error {
+	if strings.TrimSpace(r.Image) == "" {
+		return errors.New("image reference is required")
 	}
-	if p.Source != nil {
-		return []Source{*p.Source}
+	ref, err := reference.ParseNormalizedNamed(r.Image)
+	if err != nil {
+		return fmt.Errorf("invalid image reference %q: %w", r.Image, err)
+	}
+	if !reference.IsNameOnly(ref) {
+		return nil
 	}
 	return nil
-}
-
-func validateRemote(remote Remote) error {
-	if strings.TrimSpace(remote.Image) == "" {
-		return errors.New("image is required")
-	}
-	named, err := reference.ParseNormalizedNamed(remote.Image)
-	if err != nil {
-		return fmt.Errorf("invalid image %q: %w", remote.Image, err)
-	}
-	if _, ok := named.(reference.NamedTagged); !ok {
-		return errors.New("image must include a tag")
-	}
-	if remote.Digest != "" {
-		parsed, err := digest.Parse(remote.Digest)
-		if err != nil {
-			return fmt.Errorf("invalid digest %q: %w", remote.Digest, err)
-		}
-		if parsed.Algorithm() == "" || parsed.Encoded() == "" {
-			return fmt.Errorf("invalid digest %q", remote.Digest)
-		}
-	}
-	return nil
-}
-
-func (s Source) Validate() error {
-	if s.Type != SourceLocal && s.Type != SourceGit {
-		return fmt.Errorf("type must be %q or %q", SourceLocal, SourceGit)
-	}
-	if strings.TrimSpace(s.File) == "" {
-		return errors.New("file is required")
-	}
-	if filepath.IsAbs(s.File) || filepath.Clean(s.File) == ".." || strings.HasPrefix(filepath.Clean(s.File), ".."+string(filepath.Separator)) {
-		return errors.New("file must be a relative path inside the source context")
-	}
-	if s.Context != "" && (filepath.IsAbs(s.Context) || filepath.Clean(s.Context) == ".." || strings.HasPrefix(filepath.Clean(s.Context), ".."+string(filepath.Separator))) {
-		return errors.New("context must be a relative path")
-	}
-	for key := range s.BuildArgs {
-		if strings.TrimSpace(key) == "" {
-			return errors.New("build args cannot contain an empty key")
-		}
-	}
-	for _, platform := range s.Platforms {
-		if strings.TrimSpace(platform) == "" {
-			return errors.New("platforms cannot contain an empty value")
-		}
-	}
-	switch s.Type {
-	case SourceLocal:
-		if strings.TrimSpace(s.Path) == "" {
-			return errors.New("path is required for local source")
-		}
-		if s.URL != "" || s.Ref != "" {
-			return errors.New("url and ref are not valid for local source")
-		}
-	case SourceGit:
-		if strings.TrimSpace(s.URL) == "" {
-			return errors.New("url is required for git source")
-		}
-		if strings.TrimSpace(s.Ref) == "" {
-			return errors.New("ref is required for git source")
-		}
-	}
-	return nil
-}
-
-func (p Package) BuildPlan(sourceRoot, workDir string) (BuildPlan, error) {
-	return p.BuildPlanWithOptions(ResolveOptions{
-		Mode:       ResolveSource,
-		SourceRoot: sourceRoot,
-		WorkDir:    workDir,
-	})
-}
-
-// BuildPlanWithOptions selects the first usable source and prepares its build
-// commands. Git sources are checked out into a persistent cache.
-func (p Package) BuildPlanWithOptions(options ResolveOptions) (BuildPlan, error) {
-	if err := p.Validate(); err != nil {
-		return BuildPlan{}, err
-	}
-	if strings.TrimSpace(options.SourceRoot) == "" {
-		options.SourceRoot = "."
-	}
-
-	candidates := p.sourceCandidates()
-	if len(candidates) == 0 {
-		return BuildPlan{}, fmt.Errorf("%w: package %s has no source candidates", ErrSourceUnavailable, p.Ref())
-	}
-
-	localErrors := make([]string, 0, len(candidates))
-	for _, source := range candidates {
-		switch source.Type {
-		case SourceLocal:
-			root := source.Path
-			if !filepath.IsAbs(root) {
-				root = filepath.Join(options.SourceRoot, root)
-			}
-			if err := validateLocalSource(root, source); err != nil {
-				localErrors = append(localErrors, err.Error())
-				continue
-			}
-			return p.buildPlanForSource(source, root), nil
-		case SourceGit:
-			cacheRoot := options.SourceCache
-			if strings.TrimSpace(cacheRoot) == "" {
-				cacheRoot = DefaultSourceCache()
-			}
-			cacheDir := packageSourceCachePath(p, source, cacheRoot)
-			ready, err := sourceCacheReady(cacheDir)
-			if err != nil {
-				return BuildPlan{}, err
-			}
-			plan := p.buildPlanForSource(source, cacheDir)
-			if !ready {
-				plan.Commands = append([]BuildCommand{
-					{Name: "mkdir", Args: []string{"-p", cacheRoot}},
-					{Name: "git", Args: []string{"clone", "--no-checkout", source.URL, cacheDir}},
-					{Name: "git", Args: []string{"-C", cacheDir, "checkout", "--detach", source.Ref}},
-				}, plan.Commands...)
-			}
-			return plan, nil
-		}
-	}
-
-	return BuildPlan{}, fmt.Errorf("%w: package %s: %s", ErrSourceUnavailable, p.Ref(), strings.Join(localErrors, "; "))
-}
-
-func validateLocalSource(root string, source Source) error {
-	info, err := os.Stat(root)
-	if err != nil {
-		return fmt.Errorf("local source %q is unavailable: %w", root, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("local source %q is not a directory", root)
-	}
-	contextDir := filepath.Join(root, sourceContext(source))
-	contextInfo, err := os.Stat(contextDir)
-	if err != nil {
-		return fmt.Errorf("local source context %q is unavailable: %w", contextDir, err)
-	}
-	if !contextInfo.IsDir() {
-		return fmt.Errorf("local source context %q is not a directory", contextDir)
-	}
-	file := filepath.Join(contextDir, source.File)
-	fileInfo, err := os.Stat(file)
-	if err != nil {
-		return fmt.Errorf("local source file %q is unavailable: %w", file, err)
-	}
-	if fileInfo.IsDir() {
-		return fmt.Errorf("local source file %q is a directory", file)
-	}
-	return nil
-}
-
-func sourceContext(source Source) string {
-	if source.Context == "" {
-		return "."
-	}
-	return source.Context
-}
-
-func packageSourceCachePath(p Package, source Source, cacheRoot string) string {
-	key := sha256.Sum256([]byte(p.Ref() + "\x00" + source.URL + "\x00" + source.Ref))
-	return filepath.Join(cacheRoot, fmt.Sprintf("%x", key[:16]))
-}
-
-func sourceCacheReady(cacheDir string) (bool, error) {
-	info, err := os.Stat(cacheDir)
-	if errors.Is(err, os.ErrNotExist) {
-		return false, nil
-	}
-	if err != nil {
-		return false, fmt.Errorf("inspect package source cache %q: %w", cacheDir, err)
-	}
-	if !info.IsDir() {
-		return false, fmt.Errorf("package source cache %q is not a directory", cacheDir)
-	}
-	if _, err := os.Stat(filepath.Join(cacheDir, ".git")); err == nil {
-		return true, nil
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, fmt.Errorf("inspect package source cache %q: %w", cacheDir, err)
-	}
-	return false, fmt.Errorf("package source cache %q is incomplete; remove it and retry", cacheDir)
-}
-
-func (p Package) buildPlanForSource(source Source, sourceRoot string) BuildPlan {
-	contextDir := filepath.Join(sourceRoot, sourceContext(source))
-	buildArgs := []string{"build", "-t", p.Remote.Image}
-	keys := make([]string, 0, len(source.BuildArgs))
-	for key := range source.BuildArgs {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	for _, key := range keys {
-		buildArgs = append(buildArgs, "--build-arg", key+"="+source.BuildArgs[key])
-	}
-	for _, platform := range source.Platforms {
-		buildArgs = append(buildArgs, "--platform", platform)
-	}
-	buildArgs = append(buildArgs, "-f", filepath.Join(contextDir, source.File), contextDir)
-	return BuildPlan{
-		PackageRef: p.Ref(),
-		Image:      p.Remote.Image,
-		Commands:   []BuildCommand{{Name: "sealos", Args: buildArgs, Dir: contextDir}},
-	}
 }

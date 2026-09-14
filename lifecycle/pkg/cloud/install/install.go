@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	osExec "os/exec"
 	"path/filepath"
@@ -136,9 +137,10 @@ global_http_external_url() {
 // Config contains the inputs required by the Sealos Cloud installer.
 type Config struct {
 	Distribution     string
+	DistributionManifest *distribution.Manifest
 	PackageMode      distribution.ResolveMode
 	SourceRoot       string
-	SourceCache      string
+	BuildCache       string
 	StateDir         string
 	ClusterName      string
 	TargetID         string
@@ -201,9 +203,10 @@ func (d *configDuration) UnmarshalJSON(data []byte) error {
 // explicit false, zero, and empty values.
 type ConfigFile struct {
 	Distribution         *string         `json:"distribution,omitempty" yaml:"distribution,omitempty"`
+	DistributionManifestData *json.RawMessage `json:"distributionManifest,omitempty" yaml:"distributionManifest,omitempty"`
 	PackageMode          *string         `json:"packageMode,omitempty" yaml:"packageMode,omitempty"`
 	SourceRoot           *string         `json:"sourceRoot,omitempty" yaml:"sourceRoot,omitempty"`
-	SourceCache          *string         `json:"sourceCache,omitempty" yaml:"sourceCache,omitempty"`
+	BuildCache           *string         `json:"buildCache,omitempty" yaml:"buildCache,omitempty"`
 	StateDir             *string         `json:"stateDir,omitempty" yaml:"stateDir,omitempty"`
 	ClusterName          *string         `json:"cluster,omitempty" yaml:"cluster,omitempty"`
 	TargetID             *string         `json:"targetID,omitempty" yaml:"targetID,omitempty"`
@@ -287,7 +290,16 @@ func (f ConfigFile) Apply(cfg *Config, overridden map[string]bool) map[string]bo
 	setString("distribution", f.Distribution, &cfg.Distribution)
 	setString("packageMode", f.PackageMode, (*string)(&cfg.PackageMode))
 	setString("sourceRoot", f.SourceRoot, &cfg.SourceRoot)
-	setString("sourceCache", f.SourceCache, &cfg.SourceCache)
+	setString("buildCache", f.BuildCache, &cfg.BuildCache)
+	if f.DistributionManifestData != nil && !provided["distributionManifest"] {
+		manifest, err := distribution.LoadDistributionFromYAML(*f.DistributionManifestData)
+		if err == nil {
+			cfg.DistributionManifest = manifest
+			provided["distributionManifest"] = true
+		} else {
+			fmt.Fprintf(os.Stderr, "warning: failed to parse inline distribution manifest: %v\n", err)
+		}
+	}
 	setString("stateDir", f.StateDir, &cfg.StateDir)
 	setString("cluster", f.ClusterName, &cfg.ClusterName)
 	setString("targetID", f.TargetID, &cfg.TargetID)
@@ -351,7 +363,7 @@ func DefaultConfig() Config {
 		// Absolute local source paths are owned by individual packages. This
 		// remains a fallback for legacy manifests that use relative paths.
 		SourceRoot:           currentDirectory(),
-		SourceCache:          distribution.DefaultSourceCache(),
+		BuildCache:           distribution.DefaultBuildCacheDir(),
 		StateDir:             distribution.DefaultPackageStateDir,
 		ClusterName:          "default",
 		CloudPort:            DefaultCloudPort,
@@ -420,7 +432,7 @@ func ConfigFromEnv(lookup func(string) (string, bool)) Config {
 	setString("SEALOS_V2_DISTRIBUTION", &cfg.Distribution)
 	setString("SEALOS_V2_PACKAGE_MODE", (*string)(&cfg.PackageMode))
 	setString("SEALOS_V2_SOURCE_ROOT", &cfg.SourceRoot)
-	setString("SEALOS_V2_SOURCE_CACHE", &cfg.SourceCache)
+	setString("SEALOS_V2_BUILD_CACHE", &cfg.BuildCache)
 	setString("SEALOS_PACKAGE_STATE_DIR", &cfg.StateDir)
 	setString("SEALOS_PACKAGE_CLUSTER", &cfg.ClusterName)
 	setString("SEALOS_PACKAGE_TARGET_ID", &cfg.TargetID)
@@ -914,7 +926,7 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	images, buildPlans, err := ResolveImagesWithOptions(manifest, distribution.ResolveOptions{
 		Mode:        i.Config.PackageMode,
 		SourceRoot:  i.Config.SourceRoot,
-		SourceCache: i.Config.SourceCache,
+		BuildCacheDir: i.Config.BuildCache,
 		WorkDir:     workDir,
 	})
 	if err != nil {
@@ -922,8 +934,8 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 	}
 	if strings.TrimSpace(i.Config.CiliumVersion) == "" {
 		for _, pkg := range manifest.Packages {
-			if pkg.Name == "cilium" {
-				i.Config.CiliumVersion = pkg.Version
+			if pkg.Name() == "cilium" {
+				i.Config.CiliumVersion = pkg.Version()
 				break
 			}
 		}
@@ -938,8 +950,15 @@ func (i *Installer) Install(ctx context.Context, manifest *distribution.Manifest
 			defer os.RemoveAll(plan.CleanupDir)
 		}
 		for _, command := range plan.Commands {
-			if err := i.run(ctx, Command{Name: command.Name, Args: command.Args, Dir: command.Dir}); err != nil {
-				return err
+			cmd := Command{Name: command.Name, Args: command.Args, Dir: command.Dir}
+			if isBuildCommand(cmd) {
+				if err := i.cachedBuildCommand(ctx, plan, cmd); err != nil {
+					return err
+				}
+			} else {
+				if err := i.run(ctx, cmd); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -1157,7 +1176,7 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 	resolved, err := distribution.ResolvePackages(manifest, distribution.ResolveOptions{
 		Mode:        i.Config.PackageMode,
 		SourceRoot:  i.Config.SourceRoot,
-		SourceCache: i.Config.SourceCache,
+		BuildCacheDir: i.Config.BuildCache,
 		WorkDir:     workDir,
 	})
 	if err != nil {
@@ -1197,8 +1216,15 @@ func (i *Installer) installBootstrap(ctx context.Context, manifest *distribution
 			defer os.RemoveAll(plan.CleanupDir)
 		}
 		for _, command := range plan.Commands {
-			if err := i.run(ctx, Command{Name: command.Name, Args: command.Args, Dir: command.Dir}); err != nil {
-				return err
+			cmd := Command{Name: command.Name, Args: command.Args, Dir: command.Dir}
+			if isBuildCommand(cmd) {
+				if err := i.cachedBuildCommand(ctx, plan, cmd); err != nil {
+					return err
+				}
+			} else {
+				if err := i.run(ctx, cmd); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -1607,6 +1633,115 @@ func (i *Installer) installDistributionPackages(ctx context.Context, resolved []
 func isCloudPackage(name string) bool {
 	return strings.HasPrefix(name, "sealos-cloud-")
 }
+// hashDirectory computes a deterministic SHA256 hash of a directory's contents.
+// It includes relative file paths (sorted) and their contents, ignoring file
+// metadata (permissions, timestamps) to produce reproducible cache keys.
+func hashDirectory(dir string) (string, error) {
+	h := sha256.New()
+	if err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		if rel == "." {
+			return nil
+		}
+		if d.IsDir() {
+			_, _ = fmt.Fprintln(h, "dir:", rel)
+			return nil
+		}
+		if d.Type().IsRegular() {
+			_, _ = fmt.Fprintln(h, "file:", rel)
+			f, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			if _, err := io.Copy(h, f); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
+		return "", fmt.Errorf("hash directory %s: %w", dir, err)
+	}
+	return fmt.Sprintf("%x", h.Sum(nil)), nil
+}
+
+// isBuildCommand returns true when the command is a `sealos build` invocation.
+func isBuildCommand(command Command) bool {
+	return command.Name == "sealos" && len(command.Args) > 0 && command.Args[0] == "build"
+}
+
+// extractImageFromBuildArgs extracts the image tag from `sealos build -t <image> ...`.
+func extractImageFromBuildArgs(args []string) (string, bool) {
+	for i, arg := range args {
+		if arg == "-t" && i+1 < len(args) {
+			return args[i+1], true
+		}
+		if strings.HasPrefix(arg, "--tag") {
+			parts := strings.SplitN(arg, "=", 2)
+			if len(parts) == 2 && parts[1] != "" {
+				return parts[1], true
+			}
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+		}
+	}
+	return "", false
+}
+
+// buildCacheFilePath returns the cache file path for a given directory hash.
+func buildCacheFilePath(cacheDir, hash string) string {
+	return filepath.Join(cacheDir, hash+".tar")
+}
+
+// cachedBuildCommand wraps a `sealos build` command with build cache logic:
+//   - Before the build: checks for an existing cached image tarball.
+//   - On cache hit: runs `sealos load -i <cache-path>` and skips the build.
+//   - On cache miss: runs the build, then `sealos save <image> -o <cache-path>`.
+func (i *Installer) cachedBuildCommand(ctx context.Context, plan distribution.BuildPlan, buildCmd Command) error {
+	image, ok := extractImageFromBuildArgs(buildCmd.Args)
+	if !ok || image == "" {
+		image = plan.Image
+	}
+	if image == "" || i.Config.BuildCache == "" {
+		return i.run(ctx, buildCmd)
+	}
+
+	hash, err := hashDirectory(buildCmd.Dir)
+	if err != nil {
+		i.info("Warning: could not hash build context %s: %v; falling back to direct build", buildCmd.Dir, err)
+		return i.run(ctx, buildCmd)
+	}
+
+	cachePath := buildCacheFilePath(i.Config.BuildCache, hash)
+
+	if _, err := os.Stat(cachePath); err == nil {
+		i.info("Build cache hit for %s (%s)", plan.PackageRef, hash[:12])
+		return i.run(ctx, Command{Name: "sealos", Args: []string{"load", "-i", cachePath}})
+	}
+
+	if err := i.run(ctx, buildCmd); err != nil {
+		return err
+	}
+
+	if err := os.MkdirAll(i.Config.BuildCache, 0o700); err != nil {
+		i.info("Warning: could not create build cache directory %s: %v", i.Config.BuildCache, err)
+		return nil
+	}
+	i.info("Saving build artifact for %s to cache (%s)", plan.PackageRef, cachePath)
+	if err := i.run(ctx, Command{Name: "sealos", Args: []string{"save", "-o", cachePath, image}}); err != nil {
+		i.info("Warning: failed to save build artifact to cache: %v", err)
+		return nil
+	}
+	return nil
+}
+
 
 func (i *Installer) run(ctx context.Context, command Command) error {
 	line := command.RedactedString()

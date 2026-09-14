@@ -22,11 +22,14 @@ import (
 
 func TestCompareReportsChangesInDesiredOrderAndOrphansLast(t *testing.T) {
 	manifest := &Manifest{Name: "cloud", Version: "v2"}
-	demo := Package{Name: "demo", Version: "v2", Remote: Remote{Image: "ghcr.io/example/demo:v2"}}
-	newPackage := Package{Name: "new", Version: "v1", Remote: Remote{Image: "ghcr.io/example/new:v1"}}
-	resolved := []ResolvedPackage{{Package: demo, Image: demo.Remote.Reference()}, {Package: newPackage, Image: newPackage.Remote.Reference()}}
-	installedDemo := NewInstalledPackage(Package{Name: "demo", Version: "v1", Remote: Remote{Image: "ghcr.io/example/demo:v1"}}, "ghcr.io/example/demo:v1", ResolveRemote, PackageStatusInstalled)
-	installedOld := NewInstalledPackage(Package{Name: "old", Version: "v1", Remote: Remote{Image: "ghcr.io/example/old:v1"}}, "ghcr.io/example/old:v1", ResolveRemote, PackageStatusInstalled)
+	demo := Package{Name: "demo", Version: "v2"}
+	newPackage := Package{Name: "new", Version: "v1"}
+	resolved := []ResolvedPackage{
+		{Package: demo, Image: "ghcr.io/example/demo:v2"},
+		{Package: newPackage, Image: "ghcr.io/example/new:v1"},
+	}
+	installedDemo := NewInstalledPackage(Package{Name: "demo", Version: "v1"}, "ghcr.io/example/demo:v1", ResolveRemote, PackageStatusInstalled)
+	installedOld := NewInstalledPackage(Package{Name: "old", Version: "v1"}, "ghcr.io/example/old:v1", ResolveRemote, PackageStatusInstalled)
 	state := &State{TargetID: "target", Packages: []InstalledPackage{installedOld, installedDemo}}
 
 	diff, err := Compare(manifest, resolved, state, "target")
@@ -40,9 +43,9 @@ func TestCompareReportsChangesInDesiredOrderAndOrphansLast(t *testing.T) {
 }
 
 func TestCompareReportsUnchangedByPackageFingerprint(t *testing.T) {
-	pkg := Package{Name: "demo", Version: "v1", Description: "same", Remote: Remote{Image: "ghcr.io/example/demo:v1"}}
-	state := &State{TargetID: "target", Packages: []InstalledPackage{NewInstalledPackage(pkg, pkg.Remote.Reference(), ResolveRemote, PackageStatusInstalled)}}
-	diff, err := Compare(&Manifest{Name: "cloud", Version: "v1"}, []ResolvedPackage{{Package: pkg, Image: pkg.Remote.Reference()}}, state, "target")
+	pkg := Package{Name: "demo", Version: "v1", Description: "same"}
+	state := &State{TargetID: "target", Packages: []InstalledPackage{NewInstalledPackage(pkg, "ghcr.io/example/demo:v1", ResolveRemote, PackageStatusInstalled)}}
+	diff, err := Compare(&Manifest{Name: "cloud", Version: "v1"}, []ResolvedPackage{{Package: pkg, Image: "ghcr.io/example/demo:v1"}}, state, "target")
 	require.NoError(t, err)
 	require.Len(t, diff.ByKind(ChangeUnchanged), 1)
 	require.Empty(t, diff.ByKind(ChangeChanged))

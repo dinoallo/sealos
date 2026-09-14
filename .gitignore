@@ -26,3 +26,5 @@ pkg/registry/save/testdata/registry
 **.env*
 !scripts/cloud/sealos.env
 **/helloagents/**
+*.test
+lifecycle/sealos

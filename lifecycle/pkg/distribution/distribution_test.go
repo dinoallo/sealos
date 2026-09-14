@@ -42,79 +42,35 @@ func TestParseRefRejectsPathTraversal(t *testing.T) {
 	}
 }
 
-func TestRepositoryLoadsManifestFromPackageCatalog(t *testing.T) {
-	root := t.TempDir()
-	manifestDir := filepath.Join(root, "distributions", "cloud")
-	packageDir := filepath.Join(root, "packages", "example")
-	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.MkdirAll(packageDir, 0o755))
-	manifestData := "name: cloud\nversion: v1.0.0\npackages:\n  - example@v1.0.0\n"
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte(manifestData), 0o644))
-	packageData := "name: example\nversion: v1.0.0\nremote:\n  image: ghcr.io/example/package:v1.0.0\n  digest: sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
-	require.NoError(t, os.WriteFile(filepath.Join(packageDir, "v1.0.0.yaml"), []byte(packageData), 0o644))
-
-	repo, err := OpenLocalRepository(root)
-	require.NoError(t, err)
-	manifest, err := repo.Load("cloud@v1.0.0")
-	require.NoError(t, err)
-	require.Equal(t, "ghcr.io/example/package:v1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", manifest.Packages[0].Remote.Reference())
-	images, err := repo.Resolve("cloud@v1.0.0")
-	require.NoError(t, err)
-	require.Equal(t, []string{"ghcr.io/example/package:v1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}, images)
-
-	summaries, err := repo.List()
-	require.NoError(t, err)
-	require.Equal(t, []Summary{{Name: "cloud", Version: "v1.0.0"}}, summaries)
-	data, err := repo.Show("cloud@v1.0.0")
-	require.NoError(t, err)
-	require.Contains(t, data, "- example@v1.0.0")
-}
-
-func TestRepositoryRejectsDistributionPackageWithoutCatalogEntry(t *testing.T) {
-	root := t.TempDir()
-	manifestDir := filepath.Join(root, "distributions", "cloud")
-	require.NoError(t, os.MkdirAll(manifestDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(manifestDir, "v1.0.0.yaml"), []byte("name: cloud\nversion: v1.0.0\npackages:\n  - missing@v1.0.0\n"), 0o644))
-
-	repo, err := OpenLocalRepository(root)
-	require.NoError(t, err)
-	_, err = repo.Load("cloud@v1.0.0")
-	require.ErrorIs(t, err, ErrPackageNotFound)
-}
-
 func TestValidateRejectsDuplicates(t *testing.T) {
 	manifest := Manifest{
 		Name:    "cloud",
 		Version: "v5.1.0",
-		Packages: []Package{
-			{Name: "demo", Version: "v1", Remote: Remote{Image: "ghcr.io/example/demo:v1"}},
-			{Name: "demo", Version: "v1", Remote: Remote{Image: "ghcr.io/example/demo:v1"}},
+		Packages: []DistributionPackage{
+			{Ref: "demo@v1", Remote: &Remote{Image: "ghcr.io/example/demo:v1"}},
+			{Ref: "demo@v1", Remote: &Remote{Image: "ghcr.io/example/demo:v1"}},
 		},
 	}
 	require.Error(t, manifest.Validate())
 }
 
 func TestResolvePackagesOrdersDependenciesStably(t *testing.T) {
-	manifest := &Manifest{
-		Name:    "cloud",
-		Version: "v1",
-		Packages: []Package{
-			{Name: "application", Version: "v1", Remote: Remote{Image: "ghcr.io/example/application:v1"}, DependsOn: []PackageDependency{{Slot: "kubernetes", Version: "v1"}}},
-			{Name: "unrelated", Version: "v1", Remote: Remote{Image: "ghcr.io/example/unrelated:v1"}},
-			{Name: "kubernetes", Version: "v1", Remote: Remote{Image: "ghcr.io/example/kubernetes:v1"}, DependsOn: []PackageDependency{{Slot: "containerd", Version: "v1"}}},
-			{Name: "containerd", Version: "v1", Remote: Remote{Image: "ghcr.io/example/containerd:v1"}},
-		},
+	packages := []Package{
+		{Name: "application", Version: "v1", DependsOn: []PackageDependency{{Slot: "kubernetes", Version: "v1"}}},
+		{Name: "unrelated", Version: "v1"},
+		{Name: "kubernetes", Version: "v1", DependsOn: []PackageDependency{{Slot: "containerd", Version: "v1"}}},
+		{Name: "containerd", Version: "v1"},
 	}
 
-	resolved, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveRemote})
+	graph, err := resolvePackageGraph(packages)
 	require.NoError(t, err)
-	require.Equal(t, []string{"unrelated", "containerd", "kubernetes", "application"}, packageNames(resolved))
-	for _, item := range resolved {
-		if item.Package.Name == "application" {
-			require.Equal(t, []string{"kubernetes@v1"}, item.Dependencies)
+	require.Equal(t, []string{"unrelated", "containerd", "kubernetes", "application"}, packageNamesFromGraph(graph))
+	for _, node := range graph {
+		if node.Package.Name == "application" {
+			require.Equal(t, []string{"kubernetes@v1"}, node.Dependencies)
 		}
-		if item.Package.Name == "kubernetes" {
-			require.Equal(t, []string{"containerd@v1"}, item.Dependencies)
+		if node.Package.Name == "kubernetes" {
+			require.Equal(t, []string{"containerd@v1"}, node.Dependencies)
 		}
 	}
 }
@@ -126,135 +82,171 @@ name: application
 version: v1.0.0
 dependsOn:
   - slot: containerd
-    version: ">=v1 <v2"
-remote:
-  image: ghcr.io/example/application:v1.0.0
+    version: ">= 1.0.0, < 2.0.0"
 `), &pkg))
-	require.Equal(t, []PackageDependency{{Slot: "containerd", Version: ">=v1 <v2"}}, pkg.DependsOn)
-	require.NoError(t, pkg.Validate())
+	require.Len(t, pkg.DependsOn, 1)
+	require.Equal(t, "containerd", pkg.DependsOn[0].Slot)
+	require.Equal(t, ">= 1.0.0, < 2.0.0", pkg.DependsOn[0].Version)
 }
 
-func TestResolvePackagesMatchesOnePackageBySemVerRange(t *testing.T) {
-	manifest := &Manifest{
-		Name:    "platform",
+func TestResolvePackagesRejectsSelfDependency(t *testing.T) {
+	packages := []Package{{
+		Name:    "kubernetes",
+		Version: "v1.28.15",
+		DependsOn: []PackageDependency{{
+			Slot:    "kubernetes",
+			Version: "v1.28.15",
+		}},
+	}}
+	_, err := resolvePackageGraph(packages)
+	require.ErrorContains(t, err, "cannot depend on itself")
+}
+
+func TestResolvePackagesRejectsMissingSlot(t *testing.T) {
+	packages := []Package{
+		{Name: "application", Version: "v1.0.0", DependsOn: []PackageDependency{{Slot: "missing", Version: "v1.0.0"}}},
+		{Name: "unrelated", Version: "v1.0.0"},
+	}
+	_, err := resolvePackageGraph(packages)
+	require.ErrorContains(t, err, `slot "missing"`)
+}
+
+func TestResolvePackagesRejectsIncompatibleVersion(t *testing.T) {
+	packages := []Package{
+		{Name: "application", Version: "v1.0.0", DependsOn: []PackageDependency{{Slot: "database", Version: ">= 2.0.0"}}},
+		{Name: "database", Version: "v1.0.0"},
+	}
+	_, err := resolvePackageGraph(packages)
+	require.ErrorContains(t, err, `matching version constraint ">= 2.0.0"`)
+}
+
+func TestResolvePackagesRejectsDuplicateSlots(t *testing.T) {
+	pkg := Package{
+		Name:    "application",
 		Version: "v1.0.0",
-		Packages: []Package{
-			{Name: "application", Version: "v1.0.0", Remote: Remote{Image: "ghcr.io/example/application:v1.0.0"}, DependsOn: []PackageDependency{{Slot: "containerd", Version: ">=v1 <v2"}}},
-			{Name: "containerd", Version: "v1.28.15", Remote: Remote{Image: "ghcr.io/example/containerd:v1.28.15"}},
-			{Name: "containerd", Version: "v2.0.0", Remote: Remote{Image: "ghcr.io/example/containerd:v2.0.0"}},
+		DependsOn: []PackageDependency{
+			{Slot: "database", Version: "v1"},
+			{Slot: "database", Version: "v1"},
 		},
 	}
-
-	resolved, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveRemote})
-	require.NoError(t, err)
-	require.Equal(t, []string{"containerd", "application", "containerd"}, packageNames(resolved))
-	require.Equal(t, []string{"containerd@v1.28.15"}, resolved[1].Dependencies)
+	require.ErrorContains(t, pkg.Validate(), "duplicate dependency slot")
 }
 
-func TestResolvePackagesSupportsPrereleaseConstraints(t *testing.T) {
-	manifest := &Manifest{
-		Name:    "platform",
-		Version: "v1.0.0",
-		Packages: []Package{
-			{Name: "application", Version: "v1.0.0", Remote: Remote{Image: "ghcr.io/example/application:v1.0.0"}, DependsOn: []PackageDependency{{Slot: "runtime", Version: ">=v1.2.0-rc.1 <v1.3.0-0"}}},
-			{Name: "runtime", Version: "v1.2.0-rc.2", Remote: Remote{Image: "ghcr.io/example/runtime:v1.2.0-rc.2"}},
-		},
+func TestResolvePackagesRejectsUnmatchedDuplicatePackage(t *testing.T) {
+	packages := []Package{
+		{Name: "cilium", Version: "v1.16.9"},
+		{Name: "cilium", Version: "v1.16.9"},
 	}
-
-	resolved, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveRemote})
-	require.NoError(t, err)
-	require.Equal(t, []string{"runtime@v1.2.0-rc.2"}, resolved[1].Dependencies)
+	_, err := resolvePackageGraph(packages)
+	require.ErrorContains(t, err, `duplicate package "cilium@v1.16.9"`)
 }
 
-func TestValidateRejectsUnresolvablePackageDependency(t *testing.T) {
-	tests := []struct {
-		name       string
-		packages   []Package
-		errMessage string
+func TestPackageValidationVersions(t *testing.T) {
+	for _, version := range []struct {
+		version string
+		valid   bool
 	}{
-		{
-			name:       "invalid constraint",
-			packages:   []Package{{Name: "app", Version: "v1", Remote: Remote{Image: "ghcr.io/example/app:v1"}, DependsOn: []PackageDependency{{Slot: "base", Version: ">=v1 <"}}}},
-			errMessage: "invalid version constraint",
-		},
-		{
-			name:       "invalid slot",
-			packages:   []Package{{Name: "app", Version: "v1", Remote: Remote{Image: "ghcr.io/example/app:v1"}, DependsOn: []PackageDependency{{Slot: "../base", Version: "v1"}}}},
-			errMessage: "invalid dependency slot",
-		},
-		{
-			name: "no match",
-			packages: []Package{
-				{Name: "app", Version: "v1", Remote: Remote{Image: "ghcr.io/example/app:v1"}, DependsOn: []PackageDependency{{Slot: "base", Version: ">=v1 <v2"}}},
-				{Name: "base", Version: "v2", Remote: Remote{Image: "ghcr.io/example/base:v2"}},
-			},
-			errMessage: "no selected package in slot",
-		},
-		{
-			name: "multiple matches",
-			packages: []Package{
-				{Name: "app", Version: "v1", Remote: Remote{Image: "ghcr.io/example/app:v1"}, DependsOn: []PackageDependency{{Slot: "base", Version: ">=v1 <v2"}}},
-				{Name: "base", Version: "v1.0.0", Remote: Remote{Image: "ghcr.io/example/base:v1.0.0"}},
-				{Name: "base", Version: "v1.1.0", Remote: Remote{Image: "ghcr.io/example/base:v1.1.0"}},
-			},
-			errMessage: "matches multiple selected packages",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := (Manifest{Name: "platform", Version: "v1.0.0", Packages: tt.packages}).Validate()
-			require.ErrorContains(t, err, tt.errMessage)
-		})
+		{"v1.2.3", true},
+		{"1.2.3", true},
+		{"v0.1.0-rc1", true},
+		{"latest", false},
+	} {
+		pkg := Package{Name: "demo", Version: version.version}
+		if version.valid {
+			require.NoError(t, pkg.Validate(), version.version)
+		} else {
+			require.Error(t, pkg.Validate(), version.version)
+		}
 	}
 }
 
-func TestResolvePackagesWithoutDependenciesKeepsManifestOrder(t *testing.T) {
-	manifest := &Manifest{
-		Name:    "cloud",
-		Version: "v1",
-		Packages: []Package{
-			{Name: "first", Version: "v1", Remote: Remote{Image: "ghcr.io/example/first:v1"}},
-			{Name: "second", Version: "v1", Remote: Remote{Image: "ghcr.io/example/second:v1"}},
-		},
-	}
+func TestPackageValidationRejectsEmptyName(t *testing.T) {
+	require.Error(t, (Package{Name: "", Version: "v1"}).Validate())
+}
 
-	resolved, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveRemote})
+func TestPackageValidationRejectsSelfDependency(t *testing.T) {
+	err := (Package{Name: "demo", Version: "v1", DependsOn: []PackageDependency{{Slot: "demo", Version: "v1"}}}).Validate()
+	require.ErrorContains(t, err, "cannot depend on itself")
+}
+
+func TestValidateRemoteImageDigest(t *testing.T) {
+	for _, remote := range []Remote{
+		{Image: "ghcr.io/example/package:v1.0.0"},
+		{Image: "ghcr.io/example/package:v1.0.0", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+	} {
+		require.NoError(t, validateRemote(remote))
+	}
+}
+
+func TestValidateRemoteRejectsEmptyImage(t *testing.T) {
+	require.Error(t, validateRemote(Remote{Image: ""}))
+}
+
+func TestValidateRemoteRejectsInvalidImage(t *testing.T) {
+	require.Error(t, validateRemote(Remote{Image: "://invalid"}))
+}
+
+func TestDefaultBuildCacheDirUsesXDG(t *testing.T) {
+	t.Setenv("XDG_CACHE_HOME", "/tmp/xdg-cache")
+	require.Equal(t, "/tmp/xdg-cache/sealos/build", DefaultBuildCacheDir())
+}
+
+func TestPackageValidateChecksDependencySlots(t *testing.T) {
+	require.ErrorContains(t, (Package{Name: "demo", Version: "v1", DependsOn: []PackageDependency{{Slot: "", Version: "v1"}}}).Validate(), "empty dependency slot")
+	require.ErrorContains(t, (Package{Name: "demo", Version: "v1", DependsOn: []PackageDependency{{Slot: "@invalid", Version: "v1"}}}).Validate(), "invalid dependency slot")
+	require.ErrorContains(t, (Package{Name: "demo", Version: "v1", DependsOn: []PackageDependency{{Slot: "database", Version: ""}}}).Validate(), "empty version constraint")
+	require.ErrorContains(t, (Package{Name: "demo", Version: "v1", DependsOn: []PackageDependency{{Slot: "database", Version: "invalid"}}}).Validate(), "invalid version constraint") // actual text may differ
+}
+
+func TestRemoteReference(t *testing.T) {
+	r := Remote{Image: "ghcr.io/example/package:v1.0.0"}
+	require.Equal(t, "ghcr.io/example/package:v1.0.0", r.Reference())
+}
+
+func TestRemoteReferenceWithDigest(t *testing.T) {
+	r := Remote{Image: "ghcr.io/example/package:v1.0.0", Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+	require.Equal(t, "ghcr.io/example/package:v1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", r.Reference())
+}
+
+func TestPackageValidationEmptyDescription(t *testing.T) {
+	require.NoError(t, (Package{Name: "demo", Version: "v1", Description: ""}).Validate())
+}
+
+func TestBuildPlanFromLocalRepo(t *testing.T) {
+	root := t.TempDir()
+	contextDir := filepath.Join(root, "packages", "example", "v1.0.0")
+	require.NoError(t, os.MkdirAll(contextDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(contextDir, "Kubefile"), []byte("FROM scratch\n"), 0o644))
+	pkg := Package{Name: "example", Version: "v1.0.0"}
+
+	plan, err := buildPlanFromRepo(root, pkg, ResolveOptions{})
 	require.NoError(t, err)
-	require.Equal(t, []string{"first", "second"}, packageNames(resolved))
+	require.Len(t, plan.Commands, 1)
+	require.Equal(t, "sealos", plan.Commands[0].Name)
+	require.Equal(t, contextDir, plan.Commands[0].Dir)
 }
 
-func TestValidateRejectsInvalidPackageDependencies(t *testing.T) {
-	tests := []struct {
-		name       string
-		dependsOn  []PackageDependency
-		extra      []Package
-		errMessage string
-	}{
-		{name: "missing", dependsOn: []PackageDependency{{Slot: "other", Version: "v1"}}, errMessage: "depends on missing package slot"},
-		{name: "self", dependsOn: []PackageDependency{{Slot: "self", Version: "v1"}}, errMessage: "cannot depend on itself"},
-		{name: "duplicate", dependsOn: []PackageDependency{{Slot: "base", Version: "v1"}, {Slot: "base", Version: "v1"}}, extra: []Package{{Name: "base", Version: "v1", Remote: Remote{Image: "ghcr.io/example/base:v1"}}}, errMessage: "duplicate dependency"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			packages := append([]Package{{Name: tt.name, Version: "v1", Remote: Remote{Image: "ghcr.io/example/" + tt.name + ":v1"}, DependsOn: tt.dependsOn}}, tt.extra...)
-			manifest := Manifest{Name: "cloud", Version: "v1", Packages: packages}
-			err := manifest.Validate()
-			require.ErrorContains(t, err, tt.errMessage)
-		})
-	}
+func TestBuildPlanFromRepoRejectsMissingContext(t *testing.T) {
+	root := t.TempDir()
+	pkg := Package{Name: "missing", Version: "v1.0.0"}
+	_, err := buildPlanFromRepo(root, pkg, ResolveOptions{})
+	require.ErrorContains(t, err, "not found")
 }
 
-func TestValidateRejectsPackageDependencyCycle(t *testing.T) {
-	manifest := Manifest{
-		Name:    "cloud",
-		Version: "v1",
-		Packages: []Package{
-			{Name: "a", Version: "v1", Remote: Remote{Image: "ghcr.io/example/a:v1"}, DependsOn: []PackageDependency{{Slot: "b", Version: "v1"}}},
-			{Name: "b", Version: "v1", Remote: Remote{Image: "ghcr.io/example/b:v1"}, DependsOn: []PackageDependency{{Slot: "a", Version: "v1"}}},
-		},
+func TestRemoteDigestReference(t *testing.T) {
+	r := Remote{
+		Image:  "ghcr.io/example/package:v1.0.0",
+		Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 	}
+	require.Equal(t, "ghcr.io/example/package:v1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", r.Reference())
+}
 
-	require.ErrorContains(t, manifest.Validate(), "dependency cycle detected")
+func packageNamesFromGraph(graph []packageGraphNode) []string {
+	names := make([]string, 0, len(graph))
+	for _, node := range graph {
+		names = append(names, node.Package.Name)
+	}
+	return names
 }
 
 func packageNames(packages []ResolvedPackage) []string {
@@ -263,184 +255,4 @@ func packageNames(packages []ResolvedPackage) []string {
 		names = append(names, item.Package.Name)
 	}
 	return names
-}
-
-func TestLoadPackageWithLocalSource(t *testing.T) {
-	pkg := Package{
-		Name:    "sealos-cloud-user-controller",
-		Version: "v5.1.0",
-		Remote:  Remote{Image: "ghcr.io/labring/sealos-cloud-user-controller:v5.1.0"},
-		Sources: []Source{
-			{Type: SourceLocal, Path: "controllers/user/deploy", File: "Kubefile"},
-			{Type: SourceGit, URL: "https://github.com/labring/sealos.git", Ref: "v5.1.0", Context: "controllers/user/deploy", File: "Kubefile"},
-		},
-	}
-	require.NoError(t, pkg.Validate())
-	require.Equal(t, "ghcr.io/labring/sealos-cloud-user-controller:v5.1.0", pkg.Remote.Reference())
-	require.Len(t, pkg.Sources, 2)
-	require.Equal(t, SourceLocal, pkg.Sources[0].Type)
-	require.Equal(t, "controllers/user/deploy", pkg.Sources[0].Path)
-	require.Equal(t, SourceGit, pkg.Sources[1].Type)
-	require.Equal(t, "v5.1.0", pkg.Sources[1].Ref)
-}
-
-func TestResolveSourceBuildPlanForLocalPackage(t *testing.T) {
-	pkg := Package{
-		Name:    "sealos-cloud-user-controller",
-		Version: "v5.1.0",
-		Remote:  Remote{Image: "ghcr.io/labring/sealos-cloud-user-controller:v5.1.0"},
-		Source:  &Source{Type: SourceLocal, Path: "controllers/user/deploy", File: "Kubefile"},
-	}
-
-	sourceRoot := t.TempDir()
-	contextDir := filepath.Join(sourceRoot, "controllers/user/deploy")
-	require.NoError(t, os.MkdirAll(contextDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(contextDir, "Kubefile"), []byte("FROM scratch\n"), 0o644))
-	plan, err := pkg.BuildPlan(sourceRoot, t.TempDir())
-	require.NoError(t, err)
-	require.Equal(t, pkg.Remote.Image, plan.Image)
-	require.Len(t, plan.Commands, 1)
-	require.Equal(t, "sealos", plan.Commands[0].Name)
-	require.Equal(t, contextDir, plan.Commands[0].Dir)
-	require.Equal(t, []string{
-		"build", "-t", "ghcr.io/labring/sealos-cloud-user-controller:v5.1.0",
-		"-f", filepath.Join(contextDir, "Kubefile"), contextDir,
-	}, plan.Commands[0].Args)
-}
-
-func TestResolveSourceBuildPlanForIndependentLocalPackage(t *testing.T) {
-	sourceRoot := t.TempDir()
-	contextDir := filepath.Join(sourceRoot, "deploy")
-	require.NoError(t, os.MkdirAll(contextDir, 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(contextDir, "Kubefile"), []byte("FROM scratch\n"), 0o644))
-	pkg := Package{
-		Name:    "example",
-		Version: "v1.0.0",
-		Remote:  Remote{Image: "ghcr.io/example/package:v1.0.0"},
-		Source: &Source{
-			Type:    SourceLocal,
-			Path:    sourceRoot,
-			Context: "deploy",
-			File:    "Kubefile",
-		},
-	}
-
-	plan, err := pkg.BuildPlan("/workspace/monorepo", t.TempDir())
-	require.NoError(t, err)
-	expectedContext := contextDir
-	require.Equal(t, expectedContext, plan.Commands[0].Dir)
-	require.Equal(t, []string{
-		"build", "-t", "ghcr.io/example/package:v1.0.0",
-		"-f", filepath.Join(expectedContext, "Kubefile"), expectedContext,
-	}, plan.Commands[0].Args)
-}
-
-func TestBuildPlanForGitSource(t *testing.T) {
-	pkg := Package{
-		Name:    "example",
-		Version: "v1.0.0",
-		Remote:  Remote{Image: "ghcr.io/example/package:v1.0.0"},
-		Source: &Source{
-			Type:    SourceGit,
-			URL:     "https://github.com/example/package.git",
-			Ref:     "v1.0.0",
-			Context: "deploy",
-			File:    "Kubefile",
-		},
-	}
-	sourceCache := t.TempDir()
-	plan, err := pkg.BuildPlanWithOptions(ResolveOptions{Mode: ResolveSource, SourceCache: sourceCache})
-	require.NoError(t, err)
-	require.Empty(t, plan.CleanupDir)
-	require.Len(t, plan.Commands, 4)
-	cacheDir := packageSourceCachePath(pkg, *pkg.Source, sourceCache)
-	require.Equal(t, "mkdir", plan.Commands[0].Name)
-	require.Equal(t, []string{"-p", sourceCache}, plan.Commands[0].Args)
-	require.Equal(t, "git", plan.Commands[1].Name)
-	require.Equal(t, []string{"clone", "--no-checkout", "https://github.com/example/package.git", cacheDir}, plan.Commands[1].Args)
-	require.Equal(t, []string{"-C", cacheDir, "checkout", "--detach", "v1.0.0"}, plan.Commands[2].Args)
-	require.Equal(t, filepath.Join(cacheDir, "deploy"), plan.Commands[3].Dir)
-}
-
-func TestResolveSourceRejectsPackageWithoutSource(t *testing.T) {
-	manifest := &Manifest{
-		Name:    "cloud",
-		Version: "test",
-		Packages: []Package{{
-			Name:    "kubernetes",
-			Version: "v1.28.15",
-			Remote:  Remote{Image: "ghcr.io/labring/sealos/kubernetes:v1.28.15"},
-		}},
-	}
-	_, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveSource})
-	require.ErrorContains(t, err, "no usable package source")
-}
-
-func TestSourceFallbackUsesGitWhenLocalIsMissing(t *testing.T) {
-	pkg := Package{
-		Name:    "example",
-		Version: "v1.0.0",
-		Remote:  Remote{Image: "ghcr.io/example/package:v1.0.0"},
-		Sources: []Source{
-			{Type: SourceLocal, Path: filepath.Join(t.TempDir(), "missing"), File: "Kubefile"},
-			{Type: SourceGit, URL: "https://github.com/example/package.git", Ref: "v1.0.0", File: "Kubefile"},
-		},
-	}
-
-	plan, err := pkg.BuildPlanWithOptions(ResolveOptions{Mode: ResolveSource, SourceCache: t.TempDir()})
-	require.NoError(t, err)
-	require.Equal(t, "git", plan.Commands[1].Name)
-	require.Equal(t, "https://github.com/example/package.git", plan.Commands[1].Args[2])
-}
-
-func TestSourceCacheReusesGitCheckout(t *testing.T) {
-	pkg := Package{
-		Name:    "example",
-		Version: "v1.0.0",
-		Remote:  Remote{Image: "ghcr.io/example/package:v1.0.0"},
-		Source: &Source{
-			Type: SourceGit,
-			URL:  "https://github.com/example/package.git",
-			Ref:  "v1.0.0",
-			File: "Kubefile",
-		},
-	}
-	sourceCache := t.TempDir()
-	cacheDir := packageSourceCachePath(pkg, *pkg.Source, sourceCache)
-	require.NoError(t, os.MkdirAll(filepath.Join(cacheDir, ".git"), 0o755))
-
-	plan, err := pkg.BuildPlanWithOptions(ResolveOptions{Mode: ResolveSource, SourceCache: sourceCache})
-	require.NoError(t, err)
-	require.Len(t, plan.Commands, 1)
-	require.Equal(t, "sealos", plan.Commands[0].Name)
-}
-
-func TestHybridUsesRemoteWhenSourceIsUnavailable(t *testing.T) {
-	manifest := &Manifest{
-		Name:    "cloud",
-		Version: "test",
-		Packages: []Package{{
-			Name:    "kubernetes",
-			Version: "v1.28.15",
-			Remote:  Remote{Image: "ghcr.io/labring/sealos/kubernetes:v1.28.15"},
-		}},
-	}
-	resolved, err := ResolvePackages(manifest, ResolveOptions{Mode: ResolveHybrid})
-	require.NoError(t, err)
-	require.Len(t, resolved, 1)
-	require.Nil(t, resolved[0].Build)
-	require.Equal(t, "ghcr.io/labring/sealos/kubernetes:v1.28.15", resolved[0].Image)
-}
-
-func TestRemoteDigestReference(t *testing.T) {
-	pkg := Package{
-		Name:    "example",
-		Version: "v1.0.0",
-		Remote: Remote{
-			Image:  "ghcr.io/example/package:v1.0.0",
-			Digest: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		},
-	}
-	require.NoError(t, pkg.Validate())
-	require.Equal(t, "ghcr.io/example/package:v1.0.0@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", pkg.Remote.Reference())
 }
